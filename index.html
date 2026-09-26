@@ -158,7 +158,6 @@
       margin-bottom: 20px;
     }
 
-    /* ===== DATA CONTROLS ===== */
     .data-controls {
       display: flex;
       gap: 10px;
@@ -184,20 +183,17 @@
       border-color: rgba(96, 165, 250, 0.6);
     }
 
-    .export-btn { }
-    .copy-btn { }
-    .import-btn { }
     .clear-btn {
       background: rgba(239, 68, 68, 0.1);
       border-color: rgba(239, 68, 68, 0.3);
       color: #fca5a5;
     }
+
     .clear-btn:hover {
       background: rgba(239, 68, 68, 0.2);
       border-color: rgba(239, 68, 68, 0.6);
     }
 
-    /* ===== IMPORT PANEL ===== */
     .import-panel {
       background: rgba(15, 23, 42, 0.7);
       border: 1px solid rgba(96, 165, 250, 0.3);
@@ -247,7 +243,6 @@
       flex-shrink: 0;
     }
 
-    /* ===== MATCH GRID - KEY ENHANCEMENT FOR 10+ MATCHES ===== */
     .match-grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
@@ -256,7 +251,6 @@
       width: 100%;
     }
 
-    /* ===== MATCH CARD ===== */
     .match-card {
       background: rgba(15, 23, 42, 0.5);
       border: 1px solid rgba(96, 165, 250, 0.3);
@@ -343,7 +337,6 @@
       color: #3f1015;
     }
 
-    /* ===== ODDS ROW ===== */
     .odds-row {
       display: grid;
       grid-template-columns: 1fr 1fr 1fr;
@@ -379,14 +372,6 @@
       line-height: 1.2;
     }
 
-    .odds-odds {
-      display: block;
-      font-size: 0.75rem;
-      color: #cbd5e1;
-      margin-top: 2px;
-    }
-
-    /* ===== CONFIDENCE TEXT ===== */
     .confidence-text {
       font-size: 0.8rem;
       color: #cbd5e1;
@@ -401,87 +386,10 @@
       color: #a78bfa;
     }
 
-    /* ===== H2H SECTION ===== */
-    .h2h-section {
-      margin-bottom: 10px;
-      padding: 8px;
-      background: rgba(59, 130, 246, 0.05);
-      border-radius: 6px;
-      font-size: 0.8rem;
-      border-left: 2px solid rgba(59, 130, 246, 0.3);
-    }
-
-    .h2h-section strong {
-      color: #3b82f6;
-      display: block;
-      margin-bottom: 4px;
-    }
-
-    .h2h-stats {
-      display: flex;
-      gap: 10px;
-      justify-content: space-between;
-      color: #cbd5e1;
-      font-size: 0.75rem;
-    }
-
-    .h2h-stats span {
-      background: rgba(59, 130, 246, 0.1);
-      padding: 3px 8px;
-      border-radius: 4px;
-      flex: 1;
-      text-align: center;
-    }
-
-    /* ===== TEAM STATS ===== */
-    .team-stats {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px;
-      margin-bottom: 10px;
-      font-size: 0.75rem;
-    }
-
-    .stat-col {
-      background: rgba(15, 23, 42, 0.4);
-      padding: 8px;
-      border-radius: 6px;
-      border: 1px solid rgba(96, 165, 250, 0.2);
-    }
-
-    .stat-col small {
-      color: #94a3b8;
-      display: block;
-      margin-bottom: 4px;
-      font-weight: 600;
-    }
-
-    .stat-col > div {
-      color: #e0e7ff;
-      margin-bottom: 3px;
-    }
-
-    .stat-detail {
-      color: #cbd5e1;
-      font-size: 0.7rem;
-      margin-top: 2px;
-    }
-
-    /* ===== RESULT SECTION ===== */
     .result-section {
       margin-top: auto;
       padding-top: 12px;
       border-top: 1px solid rgba(224, 231, 255, 0.1);
-    }
-
-    .result-title {
-      font-size: 0.8rem;
-      font-weight: 600;
-      color: #a78bfa;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      margin-bottom: 8px;
-      display: block;
     }
 
     .result-inputs {
@@ -553,7 +461,6 @@
       cursor: not-allowed;
     }
 
-    /* ===== SUMMARY STATS ===== */
     .summary-stats {
       background: rgba(15, 23, 42, 0.5);
       border: 1px solid rgba(148, 163, 184, 0.2);
@@ -584,26 +491,6 @@
       font-weight: 700;
     }
 
-    /* ===== BANNERS ===== */
-    .error-banner {
-      border-color: rgba(239, 68, 68, 0.4) !important;
-      color: #fca5a5 !important;
-    }
-
-    .error-banner span:first-child {
-      color: #fca5a5;
-    }
-
-    .success-banner {
-      border-color: rgba(34, 197, 94, 0.4) !important;
-      color: #bbf7d0 !important;
-    }
-
-    .success-banner span:first-child {
-      color: #bbf7d0;
-    }
-
-    /* ===== NOTIFICATIONS ===== */
     .notification {
       position: fixed;
       bottom: 20px;
@@ -662,7 +549,6 @@
       font-weight: 700;
     }
 
-    /* ===== FOOTER ===== */
     footer {
       text-align: center;
       color: #64748b;
@@ -676,7 +562,6 @@
       display: none !important;
     }
 
-    /* ===== RESPONSIVE DESIGN ===== */
     @media (max-width: 1200px) {
       .match-grid {
         grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
@@ -711,10 +596,6 @@
         gap: 10px;
       }
 
-      .team-stats {
-        grid-template-columns: 1fr;
-      }
-
       .data-controls {
         flex-direction: column;
       }
@@ -747,11 +628,6 @@
         right: 10px;
         max-width: none;
         bottom: 10px;
-      }
-
-      .match-banner {
-        flex-direction: column;
-        align-items: flex-start;
       }
 
       .result-inputs {
@@ -820,7 +696,7 @@
         </div>
 
         <p style="color: #94a3b8; margin-bottom: 15px; font-size: 0.9rem;">
-          Paste your betting data directly from OdiLeague. The algorithm intelligently parses all matches regardless of formatting, analyzes each fixture against its tier system and historical data, and displays comprehensive predictions for all 10+ matches.
+          Paste your betting data directly from OdiLeague. The algorithm intelligently parses all matches regardless of formatting, analyzes each fixture against its tier system and historical data, and learns from your local results.
         </p>
 
         <textarea id="data-input" placeholder="Paste your betting data here. Example:
@@ -851,6 +727,25 @@ London Blues
           </button>
           <button class="secondary-btn" id="clear-btn" type="button">Clear Input</button>
         </div>
+
+        <div class="data-controls">
+          <button class="control-btn" id="export-btn" type="button">Export JSON (Download)</button>
+          <button class="control-btn" id="copy-btn" type="button">Copy JSON</button>
+          <button class="control-btn" id="import-toggle-btn" type="button">Import JSON (Paste)</button>
+          <button class="control-btn" id="upload-btn" type="button">Upload JSON (File)</button>
+          <button class="control-btn clear-btn" id="clear-history-btn" type="button">Clear History</button>
+        </div>
+
+        <input type="file" id="import-file-input" accept="application/json" style="display:none" />
+
+        <div class="import-panel hidden" id="import-panel" aria-hidden="true">
+          <p style="color:#bfdbfe; font-size:0.95rem; margin-bottom:8px">Paste the exported JSON below and click "Paste & Import" to merge into local history.</p>
+          <textarea id="import-textarea" placeholder='Paste exported JSON here'></textarea>
+          <div style="display:flex; gap:8px; margin-top:10px;">
+            <button class="control-btn" id="paste-import-btn" type="button">Paste & Import</button>
+            <button class="control-btn secondary-btn" id="import-cancel-btn" type="button">Cancel</button>
+          </div>
+        </div>
       </section>
 
       <section class="panel results-panel hidden" id="results-panel" aria-live="polite">
@@ -868,6 +763,8 @@ London Blues
 
     <footer>Built for precision · Powered by intelligent parsing, tier analysis, and transparent probability signals · Historical learning engine active</footer>
   </div>
+
+  <div id="notification" class="notification" role="status" aria-live="polite"></div>
 
   <script src="script.js"></script>
 </body>
