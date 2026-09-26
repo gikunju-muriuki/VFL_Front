@@ -1,7 +1,7 @@
 /**
  * VFL Match History & Self-Learning Mathematical ML Engine
  * Fully autonomous local data loop utilizing IndexedDB storage
- * Enhanced with Bulk Results Parser & Import/Export Functionality
+ * Enhanced with Intelligent Bulk Results Parser & Import/Export Functionality
  */
 (() => {
   'use strict';
@@ -83,17 +83,12 @@
   }
 
   /**
-   * BULK RESULTS PARSER
-   * Ultra-fast import: paste results in format
-   * Team1
-   * Team2
-   * Goals1
-   * Goals2
-   * Team3
-   * Team4
-   * Goals3
-   * Goals4
-   * ... etc
+   * INTELLIGENT BULK RESULTS PARSER
+   * Ultra-fast import: dynamically identifies format
+   * Supports:
+   * 1. Home / Away / HomeGoals / AwayGoals (standard)
+   * 2. Home / HomeGoals / AwayGoals / Away (alternative)
+   * 3. Mixed formats with auto-detection
    */
   function parseBulkResults(rawText) {
     if (!rawText || typeof rawText !== 'string') {
@@ -107,12 +102,24 @@
     while (i < lines.length) {
       if (i + 3 >= lines.length) break;
 
-      const homeTeam = findTeamMatch(lines[i]);
-      const awayTeam = findTeamMatch(lines[i + 1]);
-      const homeGoals = parseInt(lines[i + 2], 10);
-      const awayGoals = parseInt(lines[i + 3], 10);
+      // Try to detect match pattern intelligently
+      const line0 = lines[i];
+      const line1 = lines[i + 1];
+      const line2 = lines[i + 2];
+      const line3 = lines[i + 3];
 
-      if (homeTeam && awayTeam && homeTeam !== awayTeam && !isNaN(homeGoals) && !isNaN(awayGoals)) {
+      const team0 = findTeamMatch(line0);
+      const isGoal1 = isGoalScore(line1);
+      const isGoal2 = isGoalScore(line2);
+      const team3 = findTeamMatch(line3);
+
+      // Pattern 1: Team / HomeGoals / AwayGoals / Team
+      if (team0 && isGoal1 && isGoal2 && team3 && team0 !== team3) {
+        const homeTeam = team0;
+        const awayTeam = team3;
+        const homeGoals = parseInt(line1, 10);
+        const awayGoals = parseInt(line2, 10);
+        
         const result = homeGoals > awayGoals ? '1' : homeGoals === awayGoals ? 'X' : '2';
         matches.push({
           home: homeTeam,
@@ -127,15 +134,50 @@
           oddsCombo: '0|0|0'
         });
         i += 4;
-      } else {
-        i++;
+        continue;
       }
+
+      // Pattern 2: Team / Team / HomeGoals / AwayGoals (standard)
+      const team1 = findTeamMatch(line1);
+      if (team0 && team1 && team0 !== team1 && isGoal2 && isGoalScore(line3)) {
+        const homeTeam = team0;
+        const awayTeam = team1;
+        const homeGoals = parseInt(line2, 10);
+        const awayGoals = parseInt(line3, 10);
+        
+        const result = homeGoals > awayGoals ? '1' : homeGoals === awayGoals ? 'X' : '2';
+        matches.push({
+          home: homeTeam,
+          away: awayTeam,
+          actualHomeGoals: homeGoals,
+          actualAwayGoals: awayGoals,
+          result: result,
+          timestamp: new Date().toISOString(),
+          homeOdds: 0,
+          drawOdds: 0,
+          awayOdds: 0,
+          oddsCombo: '0|0|0'
+        });
+        i += 4;
+        continue;
+      }
+
+      // No valid match found at this position, move forward
+      i++;
     }
 
     if (matches.length === 0) {
-      throw new Error('No valid match results found. Format: Team1\\nTeam2\\nHomeGoals\\nAwayGoals');
+      throw new Error('No valid match results found. Supported formats:\n1. Home\nAway\nHomeGoals\nAwayGoals\n\nOR\n\n2. Home\nHomeGoals\nAwayGoals\nAway');
     }
     return matches;
+  }
+
+  /**
+   * Helper: Check if string is a valid goal score (single digit or double digit)
+   */
+  function isGoalScore(str) {
+    const num = parseInt(str, 10);
+    return !isNaN(num) && num >= 0 && num <= 20;
   }
 
   /**
@@ -263,7 +305,7 @@
       }
     });
 
-    // Compute Empirical Empirical Tiers dynamically based on historic dataset returns
+    // Compute Empirical Tiers dynamically based on historic dataset returns
     let dynamicHomeRank = singleOddsWins.totalMatchesMatchingValue > 0 ? (singleOddsWins['1'] / singleOddsWins.totalMatchesMatchingValue) : rawHProb;
     let dynamicDrawRank = singleOddsWins.totalMatchesMatchingValue > 0 ? (singleOddsWins['X'] / singleOddsWins.totalMatchesMatchingValue) : rawDProb;
     let dynamicAwayRank = singleOddsWins.totalMatchesMatchingValue > 0 ? (singleOddsWins['2'] / singleOddsWins.totalMatchesMatchingValue) : rawAProb;
@@ -526,7 +568,10 @@
   // =========================================================================
   async function processInput() {
     const inputField = $('data-input');
-    if (!inputField || !inputField.value.trim()) return;
+    if (!inputField || !inputField.value.trim()) {
+      showNotification('Please paste data first', 'error');
+      return;
+    }
 
     try {
       const basicFixtures = parseGameweekData(inputField.value);
@@ -542,7 +587,10 @@
 
   async function processBulkResults() {
     const inputField = $('data-input');
-    if (!inputField || !inputField.value.trim()) return;
+    if (!inputField || !inputField.value.trim()) {
+      showNotification('Please paste data first', 'error');
+      return;
+    }
 
     try {
       const results = parseBulkResults(inputField.value);
@@ -554,9 +602,17 @@
       }
       
       inputField.value = '';
-      showNotification(`Bulk imported ${saved} match results to history`, 'success');
+      showNotification(`✓ Bulk imported ${saved} match results to history`, 'success');
     } catch (err) {
       showNotification(err.message, 'error');
+    }
+  }
+
+  function clearInput() {
+    const inputField = $('data-input');
+    if (inputField) {
+      inputField.value = '';
+      showNotification('Input cleared', 'info');
     }
   }
 
@@ -570,59 +626,125 @@
     importHistoryFromJson,
     handleFileUpload,
     showNotification,
-    clearAllMatches
+    clearAllMatches,
+    clearInput
   };
 
   window.addEventListener('DOMContentLoaded', () => {
+    console.log('VFL Brain initialized');
+
+    // Parse button (Mode 1: With Odds)
     const parseBtn = $('parse-btn');
-    if (parseBtn) parseBtn.addEventListener('click', processInput);
+    if (parseBtn) {
+      parseBtn.addEventListener('click', () => {
+        console.log('Parse button clicked');
+        processInput();
+      });
+    } else {
+      console.warn('Parse button not found');
+    }
 
+    // Bulk button (Mode 2: Fast Results)
     const bulkBtn = $('bulk-btn');
-    if (bulkBtn) bulkBtn.addEventListener('click', processBulkResults);
+    if (bulkBtn) {
+      bulkBtn.addEventListener('click', () => {
+        console.log('Bulk button clicked');
+        processBulkResults();
+      });
+    } else {
+      console.warn('Bulk button not found');
+    }
 
+    // Clear input button
+    const clearBtn = $('clear-btn');
+    if (clearBtn) {
+      clearBtn.addEventListener('click', () => {
+        console.log('Clear button clicked');
+        clearInput();
+      });
+    } else {
+      console.warn('Clear button not found');
+    }
+
+    // Export button
     const exportBtn = $('export-btn');
-    if (exportBtn) exportBtn.addEventListener('click', exportHistory);
+    if (exportBtn) {
+      exportBtn.addEventListener('click', () => {
+        console.log('Export button clicked');
+        exportHistory();
+      });
+    } else {
+      console.warn('Export button not found');
+    }
 
+    // Copy button
     const copyBtn = $('copy-btn');
-    if (copyBtn) copyBtn.addEventListener('click', copyHistoryToClipboard);
+    if (copyBtn) {
+      copyBtn.addEventListener('click', () => {
+        console.log('Copy button clicked');
+        copyHistoryToClipboard();
+      });
+    } else {
+      console.warn('Copy button not found');
+    }
 
+    // Import toggle button
     const importToggleBtn = $('import-toggle-btn');
     const importPanel = $('import-panel');
     if (importToggleBtn && importPanel) {
       importToggleBtn.addEventListener('click', () => {
+        console.log('Import toggle clicked');
         importPanel.classList.toggle('hidden');
       });
+    } else {
+      console.warn('Import toggle or panel not found');
     }
 
+    // Paste import button
     const pasteImportBtn = $('paste-import-btn');
     if (pasteImportBtn) {
       pasteImportBtn.addEventListener('click', async () => {
+        console.log('Paste import clicked');
         const textarea = $('import-textarea');
         if (textarea && textarea.value.trim()) {
           try {
             await importHistoryFromJson(textarea.value);
             textarea.value = '';
-            importPanel.classList.add('hidden');
+            if (importPanel) importPanel.classList.add('hidden');
           } catch (err) {
             showNotification(`Import error: ${err.message}`, 'error');
           }
+        } else {
+          showNotification('Please paste JSON data first', 'error');
         }
       });
+    } else {
+      console.warn('Paste import button not found');
     }
 
+    // Import cancel button
     const importCancelBtn = $('import-cancel-btn');
     if (importCancelBtn && importPanel) {
       importCancelBtn.addEventListener('click', () => {
+        console.log('Import cancel clicked');
         importPanel.classList.add('hidden');
-        $('import-textarea').value = '';
+        const textarea = $('import-textarea');
+        if (textarea) textarea.value = '';
       });
+    } else {
+      console.warn('Import cancel button not found');
     }
 
+    // Upload button
     const uploadBtn = $('upload-btn');
     const fileInput = $('import-file-input');
     if (uploadBtn && fileInput) {
-      uploadBtn.addEventListener('click', () => fileInput.click());
+      uploadBtn.addEventListener('click', () => {
+        console.log('Upload button clicked');
+        fileInput.click();
+      });
       fileInput.addEventListener('change', async (e) => {
+        console.log('File selected');
         if (e.target.files && e.target.files[0]) {
           try {
             await handleFileUpload(e.target.files[0]);
@@ -632,11 +754,15 @@
           e.target.value = '';
         }
       });
+    } else {
+      console.warn('Upload button or file input not found');
     }
 
+    // Clear history button
     const clearHistoryBtn = $('clear-history-btn');
     if (clearHistoryBtn) {
       clearHistoryBtn.addEventListener('click', async () => {
+        console.log('Clear history clicked');
         if (confirm('Are you sure you want to clear all match history? This cannot be undone.')) {
           try {
             await clearAllMatches();
@@ -646,13 +772,8 @@
           }
         }
       });
-    }
-
-    const clearBtn = $('clear-btn');
-    if (clearBtn) {
-      clearBtn.addEventListener('click', () => {
-        $('data-input').value = '';
-      });
+    } else {
+      console.warn('Clear history button not found');
     }
   });
 })();
