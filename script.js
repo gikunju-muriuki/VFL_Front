@@ -1,833 +1,395 @@
-const TEAM_TIERS = {
-  "London Blues": 1,
-  "Liverpool": 1,
-  "Manchester Blue": 1,
-  "London Reds": 1,
-  "Manchester Reds": 2,
-  "Aston V": 2,
-  "Newcastle": 2,
-  "Tottenham": 2,
-  "Everton": 2,
-  "Leicester": 3,
-  "West Brom": 3,
-  "Wolves": 3,
-  "Palace": 3,
-  "Brighton": 3,
-  "West Ham": 3,
-  "Leeds": 4,
-  "Burnley": 4,
-  "Fulham": 4,
-  "Southampton": 4,
-  "Sheffield U": 4,
-};
+/**
+ * VFL Match History & Self-Learning Mathematical ML Engine
+ * Fully autonomous local data loop utilizing IndexedDB storage
+ */
+(() => {
+  'use strict';
 
-const VALID_TEAMS = Object.keys(TEAM_TIERS).sort();
-const $ = (id) => document.getElementById(id);
+  const VALID_TEAMS = [
+    "Aston V", "Brighton", "Burnley", "Everton", "Fulham", "Leeds", "Leicester", 
+    "Liverpool", "London Blues", "London Reds", "Manchester Blue", "Manchester Reds", 
+    "Newcastle", "Palace", "Sheffield U", "Southampton", "Tottenham", "West Brom", 
+    "West Ham", "Wolves"
+  ].sort();
 
-const DB_CONFIG = {
-  name: 'VFL_MatchHistory',
-  version: 1,
-  store: 'matches'
-};
-
-function normalizeMatchRecord(match = {}) {
-  const home = match.home || match.homeTeam || '';
-  const away = match.away || match.awayTeam || '';
-  const actualHomeGoals = Number(match.actualHomeGoals ?? match.home_goals ?? 0);
-  const actualAwayGoals = Number(match.actualAwayGoals ?? match.away_goals ?? 0);
-  const result = match.result || (() => {
-    if (actualHomeGoals === actualAwayGoals) return 'X';
-    return actualHomeGoals > actualAwayGoals ? '1' : '2';
-  })();
-
-  return {
-    ...match,
-    home,
-    away,
-    actualHomeGoals,
-    actualAwayGoals,
-    result,
-    totalGoals: actualHomeGoals + actualAwayGoals,
-    matchup: match.matchup || `${home} vs ${away}`,
-    timestamp: match.timestamp || match.saved_at || new Date().toISOString(),
-    source: match.source || 'local'
+  const DB_CONFIG = {
+    name: 'VFL_MatchHistory',
+    version: 2, // Upgraded version to reflect new data profiles
+    store: 'matches'
   };
-}
 
-function makeMatchKey(match = {}) {
-  const home = match.home || match.homeTeam || '';
-  const away = match.away || match.awayTeam || '';
-  const hGoals = Number(match.actualHomeGoals ?? match.home_goals ?? 0);
-  const aGoals = Number(match.actualAwayGoals ?? match.away_goals ?? 0);
-  const when = match.timestamp || match.saved_at || '';
-  return `${home}|${away}|${hGoals}|${aGoals}|${when}`;
-}
+  const $ = (id) => document.getElementById(id);
+  let currentAnalyses = [];
 
-async function initDB() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_CONFIG.name, DB_CONFIG.version);
+  // Initialize IndexedDB
+  function initDB() {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open(DB_CONFIG.name, DB_CONFIG.version);
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => resolve(request.result);
+      request.onupgradeneeded = (event) => {
+        const db = event.target.result;
+        if (!db.objectStoreNames.contains(DB_CONFIG.store)) {
+          const store = db.createObjectStore(DB_CONFIG.store, { keyPath: 'id', autoIncrement: true });
+          store.createIndex('matchup', 'matchup', { unique: false });
+          store.createIndex('home', 'home', { unique: false });
+          store.createIndex('away', 'away', { unique: false });
+          store.createIndex('oddsCombo', 'oddsCombo', { unique: false });
+        }
+      };
+    });
+  }
 
-    request.onerror = () => reject(request.error);
-    request.onsuccess = () => resolve(request.result);
+  // Read all records
+  async function getAllMatches() {
+    try {
+      const db = await initDB();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(DB_CONFIG.store, 'readonly');
+        const store = tx.objectStore(DB_CONFIG.store);
+        const request = store.getAll();
+        request.onsuccess = () => resolve(request.result || []);
+        request.onerror = () => reject(request.error);
+      });
+    } catch (e) {
+      console.error(e);
+      return [];
+    }
+  }
 
-    request.onupgradeneeded = (event) => {
-      const db = event.target.result;
-      if (!db.objectStoreNames.contains(DB_CONFIG.store)) {
-        const store = db.createObjectStore(DB_CONFIG.store, { keyPath: 'id', autoIncrement: true });
-        store.createIndex('matchup', 'matchup', { unique: false });
-        store.createIndex('homeTeam', 'home', { unique: false });
-        store.createIndex('awayTeam', 'away', { unique: false });
-        store.createIndex('timestamp', 'timestamp', { unique: false });
-      }
-    };
-  });
-}
-
-async function saveMatch(matchData) {
-  try {
+  // Save new record
+  async function saveMatch(matchRecord) {
     const db = await initDB();
-    const normalized = normalizeMatchRecord(matchData);
-
     return new Promise((resolve, reject) => {
       const tx = db.transaction(DB_CONFIG.store, 'readwrite');
       const store = tx.objectStore(DB_CONFIG.store);
-      const request = store.add(normalized); 
-
+      const request = store.add(matchRecord);
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
-  } catch (error) {
-    console.error('Error saving match:', error);
-    throw error;
   }
-}
 
-async function getAllMatches() {
-  try {
-    const db = await initDB();
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(DB_CONFIG.store, 'readonly');
-      const store = tx.objectStore(DB_CONFIG.store);
-      const request = store.getAll();
+  /**
+   * FIXED BUGGY PARSER
+   * Reads data stream sequentially, identifying targets and structural slots safely.
+   */
+  function parseGameweekData(rawText) {
+    if (!rawText || typeof rawText !== 'string') throw new Error('No data provided');
 
-      request.onsuccess = () => resolve((request.result || []).map(normalizeMatchRecord));
-      request.onerror = () => reject(request.error);
-    });
-  } catch (error) {
-    console.error('Error fetching matches:', error);
-    return [];
-  }
-}
+    const lines = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+    const matches = [];
+    let i = 0;
 
-async function getHeadToHead(team1, team2) {
-  try {
-    const allMatches = await getAllMatches();
-    return allMatches.filter(m =>
-      (m.home === team1 && m.away === team2) ||
-      (m.home === team2 && m.away === team1)
-    );
-  } catch (error) {
-    console.error('Error fetching head-to-head:', error);
-    return [];
-  }
-}
+    while (i < lines.length) {
+      // Look ahead to check if we can parse a valid team pairing block
+      if (i + 1 >= lines.length) { i++; continue; }
 
-async function getTeamStats(teamName, venue = null) {
-  try {
-    const allMatches = await getAllMatches();
-    let matches = [];
+      const homeTeam = findTeamMatch(lines[i]);
+      const awayTeam = findTeamMatch(lines[i+1]);
 
-    if (venue === 'home') {
-      matches = allMatches.filter(m => m.home === teamName && m.result);
-    } else if (venue === 'away') {
-      matches = allMatches.filter(m => m.away === teamName && m.result);
-    } else {
-      matches = allMatches.filter(m => (m.home === teamName || m.away === teamName) && m.result);
+      if (homeTeam && awayTeam && homeTeam !== awayTeam) {
+        let scanIdx = i + 2;
+        let collectedOdds = [];
+
+        // Collect exactly 3 odds metrics corresponding to (1, X, 2)
+        while (collectedOdds.length < 3 && scanIdx < lines.length) {
+          const currentLine = lines[scanIdx];
+          
+          // Skip string outcome markers if present in raw clipboard streams
+          if (['1', 'X', '2'].includes(currentLine)) {
+            scanIdx++;
+            continue;
+          }
+          
+          const val = parseFloat(currentLine);
+          if (!isNaN(val) && val > 1.0) {
+            collectedOdds.push(val);
+          }
+          scanIdx++;
+        }
+
+        // If we found our three specific values, register match block cleanly
+        if (collectedOdds.length === 3) {
+          matches.push({
+            home: homeTeam,
+            away: awayTeam,
+            homeOdds: collectedOdds[0],
+            drawOdds: collectedOdds[1],
+            awayOdds: collectedOdds[2]
+          });
+          i = scanIdx; // Advance main loop directly past processed data cluster
+          continue;
+        }
+      }
+      i++;
     }
 
     if (matches.length === 0) {
-      return {
-        matches: 0,
-        wins: 0,
-        draws: 0,
-        losses: 0,
-        winRate: 0,
-        avgGoalsFor: 0,
-        avgGoalsAgainst: 0,
-        cleanSheets: 0,
-        prediction: null
-      };
+      throw new Error('No valid matches found. Please ensure exact syntax patterns are present.');
     }
+    return matches;
+  }
 
-    let wins = 0, draws = 0, losses = 0;
-    let goalsFor = 0, goalsAgainst = 0, cleanSheets = 0;
-
-    matches.forEach(m => {
-      const isHome = m.home === teamName;
-      const teamGoals = isHome ? m.actualHomeGoals : m.actualAwayGoals;
-      const opponentGoals = isHome ? m.actualAwayGoals : m.actualHomeGoals;
-
-      goalsFor += teamGoals;
-      goalsAgainst += opponentGoals;
-
-      if (teamGoals > opponentGoals) wins++;
-      else if (teamGoals === opponentGoals) draws++;
-      else losses++;
-
-      if (opponentGoals === 0) cleanSheets++;
-    });
-
-    return {
-      matches: matches.length,
-      wins,
-      draws,
-      losses,
-      winRate: (wins / matches.length * 100).toFixed(1),
-      avgGoalsFor: (goalsFor / matches.length).toFixed(2),
-      avgGoalsAgainst: (goalsAgainst / matches.length).toFixed(2),
-      cleanSheets,
-      recentMatches: matches.slice(-5)
-    };
-  } catch (error) {
-    console.error('Error getting team stats:', error);
+  function findTeamMatch(input) {
+    const norm = input.toLowerCase().trim();
+    for (const team of VALID_TEAMS) {
+      if (team.toLowerCase() === norm) return team;
+    }
+    for (const team of VALID_TEAMS) {
+      if (team.toLowerCase().includes(norm) || norm.includes(team.toLowerCase())) return team;
+    }
     return null;
   }
-}
 
-async function exportMatchData() {
-  try {
-    const allMatches = await getAllMatches();
-    const json = JSON.stringify(allMatches, null, 2);
-    const blob = new Blob([json], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `VFL_backup_${new Date().toISOString().split('T')[0]}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    showNotification(`Exported ${allMatches.length} matches successfully!`, 'success');
-  } catch (error) {
-    showNotification('Error exporting data: ' + error.message, 'error');
-  }
-}
+  /**
+   * SELF-LEARNING INTELLIGENT MATHEMATICAL MODELLING
+   * Evaluates historical records to assign contextual metrics instead of fixed baseline tiers
+   */
+  async function analyzeFixtureML(home, away, hOdds, dOdds, aOdds, idx) {
+    const historicalData = await getAllMatches();
+    
+    // Implied probabilities (Bookmaker baseline projections)
+    const rawHProb = 1 / hOdds;
+    const rawDProb = 1 / dOdds;
+    const rawAProb = 1 / aOdds;
+    const margin = rawHProb + rawDProb + rawAProb;
 
-async function copyToClipboard() {
-  try {
-    const allMatches = await getAllMatches();
-    const json = JSON.stringify(allMatches, null, 2);
-    await navigator.clipboard.writeText(json);
-    showNotification(`Copied ${allMatches.length} matches to clipboard!`, 'success');
-  } catch (error) {
-    showNotification('Error copying to clipboard: ' + error.message, 'error');
-  }
-}
+    // Define unique key strings for combo matching
+    const currentCombo = `${hOdds.toFixed(2)}|${dOdds.toFixed(2)}|${aOdds.toFixed(2)}`;
 
-async function importMatchData(jsonString) {
-  try {
-    const data = JSON.parse(jsonString);
-    const matches = Array.isArray(data) ? data : Array.isArray(data.matches) ? data.matches : [];
-    if (!matches.length) {
-      throw new Error('Invalid format: Expected an array of matches');
-    }
+    // Analytics state variables
+    let totalStored = historicalData.length;
+    let singleOddsWins = { '1': 0, 'X': 0, '2': 0, totalMatchesMatchingValue: 0 };
+    let comboWins = { '1': 0, 'X': 0, '2': 0, occurrences: 0 };
+    let teamPerformanceWithOdds = { homeWinsWithTheseOdds: 0, awayWinsWithTheseOdds: 0, totalTeamMatchups: 0 };
 
-    const db = await initDB();
-    const tx = db.transaction(DB_CONFIG.store, 'readwrite');
-    const store = tx.objectStore(DB_CONFIG.store);
+    // Grouping & calculation loop over local data structures
+    historicalData.forEach(match => {
+      // 1. Process matching specific configurations
+      if (match.homeOdds === hOdds) {
+        singleOddsWins.totalMatchesMatchingValue++;
+        if (match.result === '1') singleOddsWins['1']++;
+      }
+      if (match.drawOdds === dOdds) {
+        if (match.result === 'X') singleOddsWins['X']++;
+      }
+      if (match.awayOdds === aOdds) {
+        if (match.result === '2') singleOddsWins['2']++;
+      }
 
-    const existing = await getAllMatches();
-    const seen = new Set(existing.map(makeMatchKey));
-    let count = 0;
+      // 2. Exact combination cluster verification
+      if (match.oddsCombo === currentCombo) {
+        comboWins.occurrences++;
+        comboWins[match.result]++;
+      }
 
-    for (const match of matches) {
-      const normalized = normalizeMatchRecord(match);
-      const key = makeMatchKey(normalized);
-      if (seen.has(key)) continue;
-
-      await new Promise((resolve, reject) => {
-        const request = store.add(normalized);
-        request.onsuccess = () => {
-          seen.add(key);
-          count += 1;
-          resolve();
-        };
-        request.onerror = () => reject(request.error);
-      });
-    }
-
-    showNotification(`Imported ${count} matches successfully!`, 'success');
-    return true;
-  } catch (error) {
-    showNotification('Error importing data: ' + error.message, 'error');
-    return false;
-  }
-}
-
-async function clearAllData() {
-  if (!confirm('Are you sure? This will delete ALL stored match data.')) return;
-
-  try {
-    const db = await initDB();
-    return new Promise((resolve) => {
-      const tx = db.transaction(DB_CONFIG.store, 'readwrite');
-      const store = tx.objectStore(DB_CONFIG.store);
-      const request = store.clear();
-
-      request.onsuccess = () => {
-        showNotification('All match data cleared!', 'success');
-        resolve(true);
-      };
+      // 3. Evaluate context specifics for individual team behaviors
+      if (match.home === home && match.homeOdds === hOdds) {
+        teamPerformanceWithOdds.totalTeamMatchups++;
+        if (match.result === '1') teamPerformanceWithOdds.homeWinsWithTheseOdds++;
+      }
+      if (match.away === away && match.awayOdds === aOdds) {
+        teamPerformanceWithOdds.totalTeamMatchups++;
+        if (match.result === '2') teamPerformanceWithOdds.awayWinsWithTheseOdds++;
+      }
     });
-  } catch (error) {
-    showNotification('Error clearing data: ' + error.message, 'error');
-  }
-}
 
-function parseGameweekData(rawText) {
-  if (!rawText || typeof rawText !== 'string') {
-    throw new Error('No data provided');
-  }
+    // Compute Empirical Empirical Tiers dynamically based on historic dataset returns
+    let dynamicHomeRank = singleOddsWins.totalMatchesMatchingValue > 0 ? (singleOddsWins['1'] / singleOddsWins.totalMatchesMatchingValue) : rawHProb;
+    let dynamicDrawRank = singleOddsWins.totalMatchesMatchingValue > 0 ? (singleOddsWins['X'] / singleOddsWins.totalMatchesMatchingValue) : rawDProb;
+    let dynamicAwayRank = singleOddsWins.totalMatchesMatchingValue > 0 ? (singleOddsWins['2'] / singleOddsWins.totalMatchesMatchingValue) : rawAProb;
 
-  const lines = rawText
-    .split('\n')
-    .map(line => line.trim())
-    .filter(line => line.length > 0);
+    // Blend values to calculate final objective probability weights
+    let weightH = (rawHProb * 0.3) + (dynamicHomeRank * 0.4) + (comboWins.occurrences > 0 ? (comboWins['1'] / comboWins.occurrences) * 0.3 : dynamicHomeRank * 0.3);
+    let weightX = (rawDProb * 0.3) + (dynamicDrawRank * 0.4) + (comboWins.occurrences > 0 ? (comboWins['X'] / comboWins.occurrences) * 0.3 : dynamicDrawRank * 0.3);
+    let weightA = (rawAProb * 0.3) + (dynamicAwayRank * 0.4) + (comboWins.occurrences > 0 ? (comboWins['2'] / comboWins.occurrences) * 0.3 : dynamicAwayRank * 0.3);
 
-  if (lines.length === 0) {
-    throw new Error('Empty data');
-  }
+    const sumWeights = weightH + weightX + weightA;
+    const finalHProb = weightH / sumWeights;
+    const finalDProb = weightX / sumWeights;
+    const finalAProb = weightA / sumWeights;
 
-  const matches = [];
-  let i = 0;
+    // Determine algorithmic prediction path
+    let prediction = '1';
+    let maxWeight = finalHProb;
+    if (finalDProb > maxWeight) { prediction = 'X'; maxWeight = finalDProb; }
+    if (finalAProb > maxWeight) { prediction = '2'; maxWeight = finalAProb; }
 
-  while (i < lines.length) {
-    const potentialHome = lines[i];
-    const potentialAway = lines[i + 1];
+    // Risk to Reward calculation (R:R Ratio Evaluation)
+    // Formula: Edge = (Calculated Probability * Multiplier) - 1
+    let edge1 = (finalHProb * hOdds) - 1;
+    let edgeX = (finalDProb * dOdds) - 1;
+    let edge2 = (finalAProb * aOdds) - 1;
 
-    if (!potentialHome || !potentialAway) {
-      i += 1;
-      continue;
+    let chosenEdge = prediction === '1' ? edge1 : prediction === 'X' ? edgeX : edge2;
+    let chosenOdds = prediction === '1' ? hOdds : prediction === 'X' ? dOdds : aOdds;
+
+    let rrClassification = "POOR (Negative Value Line)";
+    let rrColor = "#fca5a5";
+    if (chosenEdge > 0.15) {
+      rrClassification = "EXCELLENT (High Empirical Value)";
+      rrColor = "#86efac";
+    } else if (chosenEdge > 0.02) {
+      rrClassification = "GOOD (Fair Market Price)";
+      rrColor = "#93c5fd";
     }
 
-    const homeTeam = findTeamMatch(potentialHome);
-    const awayTeam = findTeamMatch(potentialAway);
-
-    if (!homeTeam || !awayTeam || homeTeam === awayTeam) {
-      i += 1;
-      continue;
-    }
-
-    i += 2;
-
-    const oddsArray = [];
-    let j = i;
-
-    while (oddsArray.length < 6 && j < lines.length) {
-      const line = lines[j];
-
-      if (line === '1' || line === 'X' || line === '2') {
-        j += 1;
-        continue;
-      }
-
-      const num = parseFloat(line);
-      if (!isNaN(num) && num > 1 && num < 1000) {
-        oddsArray.push(num);
-        j += 1;
-        if (oddsArray.length === 6) break;
-      } else {
-        j += 1;
-      }
-    }
-
-    if (oddsArray.length === 6) {
-      const [homeOdds, drawOdds, awayOdds] = [oddsArray[0], oddsArray[1], oddsArray[2]];
-      matches.push({ home: homeTeam, away: awayTeam, homeOdds, drawOdds, awayOdds });
-      i = j;
+    let confidence = 'INITIALIZING ENGINE';
+    if (totalStored > 15) {
+      confidence = maxWeight > 0.55 ? 'HIGH CONVICTION' : maxWeight > 0.40 ? 'MEDIUM SIGNAL' : 'SENSITIVE VARIANCE';
     } else {
-      i += 1;
+      confidence = 'BOOTSTRAP MODE (Low Local Sample Base)';
     }
-  }
 
-  if (matches.length === 0) {
-    throw new Error('No valid matches found. Please check your data format.');
-  }
-
-  return matches;
-}
-
-function findTeamMatch(input) {
-  const normalized = input.toLowerCase().trim();
-
-  for (const team of VALID_TEAMS) {
-    if (team.toLowerCase() === normalized) return team;
-  }
-
-  for (const team of VALID_TEAMS) {
-    const teamLower = team.toLowerCase();
-    if (teamLower.includes(normalized) || normalized.includes(teamLower)) return team;
-  }
-
-  let closestTeam = null;
-  let closestDistance = Infinity;
-
-  for (const team of VALID_TEAMS) {
-    const distance = levenshteinDistance(normalized, team.toLowerCase());
-    if (distance < closestDistance && distance <= 3) {
-      closestDistance = distance;
-      closestTeam = team;
-    }
-  }
-
-  return closestTeam;
-}
-
-function levenshteinDistance(a, b) {
-  const matrix = Array(b.length + 1)
-    .fill(null)
-    .map(() => Array(a.length + 1).fill(0));
-
-  for (let i = 0; i <= a.length; i++) matrix[0][i] = i;
-  for (let j = 0; j <= b.length; j++) matrix[j][0] = j;
-
-  for (let j = 1; j <= b.length; j++) {
-    for (let i = 1; i <= a.length; i++) {
-      const indicator = a[i - 1] === b[j - 1] ? 0 : 1;
-      matrix[j][i] = Math.min(
-        matrix[j][i - 1] + 1,
-        matrix[j - 1][i] + 1,
-        matrix[j - 1][i - 1] + indicator
-      );
-    }
-  }
-
-  return matrix[b.length][a.length];
-}
-
-async function analyzeFixture(home, away, hOdds, dOdds, aOdds, idx) {
-  const rawHProb = 1 / hOdds;
-  const rawDProb = 1 / dOdds;
-  const rawAProb = 1 / aOdds;
-  const totalMargin = rawHProb + rawDProb + rawAProb;
-
-  const hProb = rawHProb / totalMargin;
-  const dProb = rawDProb / totalMargin;
-  const aProb = rawAProb / totalMargin;
-
-  const homeTier = TEAM_TIERS[home];
-  const awayTier = TEAM_TIERS[away];
-  const tierDifferential = awayTier - homeTier;
-
-  const h2h = await getHeadToHead(home, away);
-  const homeStats = await getTeamStats(home, 'home');
-  const awayStats = await getTeamStats(away, 'away');
-
-  let prediction = '';
-  let confidence = '';
-  let dangerFlag = 'NONE';
-
-  if (hOdds <= 1.45 || aOdds <= 1.45) {
-    prediction = hOdds <= 1.45 ? '1' : '2';
-    confidence = 'MEDIUM-LOW (High Upset Probability)';
-    dangerFlag = 'CRITICAL: Heavy favorite detected. High probability of upset or stalemate.';
-  } else if (hOdds < dOdds && hOdds < aOdds && tierDifferential >= 1) {
-    prediction = '1';
-    confidence = hOdds <= 1.85 ? 'HIGH' : 'MEDIUM';
-  } else if (aOdds < dOdds && aOdds < hOdds && tierDifferential <= -1) {
-    prediction = '2';
-    confidence = aOdds <= 1.85 ? 'HIGH' : 'MEDIUM';
-  } else {
-    prediction = 'X';
-    confidence = 'MEDIUM';
-    dangerFlag = 'BALANCED MARKET: Draw profile detected.';
-  }
-
-  let historicalAccuracy = null;
-  let h2hResult = null;
-
-  if (h2h.length > 0) {
-    const h2hCorrect = h2h.filter(m => {
-      const expectedResult = calculateExpectedResult(
-        m.home === home ? m.homeOdds : m.awayOdds,
-        m.drawOdds,
-        m.home === home ? m.awayOdds : m.homeOdds
-      );
-      return expectedResult === m.result;
-    }).length;
-
-    historicalAccuracy = (h2hCorrect / h2h.length * 100).toFixed(0);
-
-    const h2hHome = h2h.filter(m => m.home === home);
-    const h2hHomeWins = h2hHome.filter(m => m.result === '1').length;
-    const h2hHomeDraws = h2hHome.filter(m => m.result === 'X').length;
-
-    h2hResult = {
-      matches: h2h.length,
-      homeWins: h2hHomeWins,
-      draws: h2hHomeDraws,
-      homeWinRate: h2hHome.length > 0 ? (h2hHomeWins / h2hHome.length * 100).toFixed(0) : 0
+    return {
+      idx, home, away,
+      hOdds, dOdds, aOdds,
+      hProb: (finalHProb * 100).toFixed(1),
+      dProb: (finalDProb * 100).toFixed(1),
+      aProb: (finalAProb * 100).toFixed(1),
+      totalMargin: ((margin - 1) * 100).toFixed(2),
+      prediction, confidence,
+      oddsCombo: currentCombo,
+      rrClassification, rrColor,
+      edge: (chosenEdge * 100).toFixed(1),
+      sampleCount: comboWins.occurrences,
+      historicalHomeWinPct: (dynamicHomeRank * 100).toFixed(0),
+      historicalDrawWinPct: (dynamicDrawRank * 100).toFixed(0),
+      historicalAwayWinPct: (dynamicAwayRank * 100).toFixed(0)
     };
   }
 
-  return {
-    idx,
-    home,
-    away,
-    homeTier,
-    awayTier,
-    hProb: (hProb * 100).toFixed(1),
-    dProb: (dProb * 100).toFixed(1),
-    aProb: (aProb * 100).toFixed(1),
-    totalMargin: ((totalMargin - 1) * 100).toFixed(2),
-    prediction,
-    confidence,
-    dangerFlag,
-    tierDifferential,
-    homeOdds: hOdds,
-    drawOdds: dOdds,
-    awayOdds: aOdds,
-    h2h: h2hResult,
-    homeStats,
-    awayStats,
-    historicalAccuracy
-  };
-}
+  // =========================================================================
+  // Interface Visual Renderer Engine Component
+  // =========================================================================
+  async function renderMatches(analyses) {
+    const resultsPanel = \$('results-panel');
+    const resultsContent = \$('results-content');
+    if (!resultsPanel || !resultsContent) return;
 
-function calculateExpectedResult(homeOdds, drawOdds, awayOdds) {
-  if (homeOdds <= 1.45 || awayOdds <= 1.45) {
-    return homeOdds <= 1.45 ? '1' : '2';
-  } else if (homeOdds < drawOdds && homeOdds < awayOdds) {
-    return '1';
-  } else if (awayOdds < drawOdds && awayOdds < homeOdds) {
-    return '2';
-  }
-  return 'X';
-}
+    currentAnalyses = analyses;
+    let html = '<div class="match-grid">';
 
-let currentAnalyses = [];
+    analyses.forEach((analysis, idx) => {
+      const predBadgeClass = analysis.prediction === '1' ? '' : analysis.prediction === 'X' ? 'draw' : 'away';
+      const predLabel = analysis.prediction === '1' ? 'HOME WIN' : analysis.prediction === 'X' ? 'DRAW' : 'AWAY WIN';
 
-async function renderMatches(analyses) {
-  const resultsPanel = $('results-panel');
-  const resultsContent = $('results-content');
+      html += `
+        <div class="match-card" id="card-${idx}">
+          <div class="match-header">
+            <span class="match-title">${analysis.home} vs ${analysis.away}</span>
+            <span class="prediction-badge ${predBadgeClass}">${predLabel}</span>
+          </div>
 
-  if (!resultsPanel || !resultsContent) return;
+          <div class="odds-row">
+            <div class="odds-cell">
+              <span class="odds-label">1 (${analysis.hOdds.toFixed(2)})</span>
+              <span class="odds-value">${analysis.hProb}%</span>
+              <small style="color:#9ca3af">Hist: ${analysis.historicalHomeWinPct}%</small>
+            </div>
+            <div class="odds-cell">
+              <span class="odds-label">X (${analysis.dOdds.toFixed(2)})</span>
+              <span class="odds-value">${analysis.dProb}%</span>
+              <small style="color:#9ca3af">Hist: ${analysis.historicalDrawWinPct}%</small>
+            </div>
+            <div class="odds-cell">
+              <span class="odds-label">2 (${analysis.aOdds.toFixed(2)})</span>
+              <span class="odds-value">${analysis.aProb}%</span>
+              <small style="color:#9ca3af">Hist: ${analysis.historicalAwayWinPct}%</small>
+            </div>
+          </div>
 
-  currentAnalyses = analyses;
+          <div class="confidence-text" style="border-top:1px dashed #374151; margin-top:8px; padding-top:8px;">
+            <div><strong>Signal Strength:</strong> ${analysis.confidence}</div>
+            <div><strong>Combo Occurrences:</strong> ${analysis.sampleCount} recorded times</div>
+            <div style="color:${analysis.rrColor}"><strong>R:R Value Metric:</strong> ${analysis.rrClassification} (${analysis.edge}% Edge)</div>
+          </div>
 
-  const predictionCounts = { 1: 0, X: 0, 2: 0 };
-  analyses.forEach(a => predictionCounts[a.prediction]++);
-
-  let html = `
-    <div class="match-banner success-banner">
-      <span>✓</span>
-      <span>Successfully parsed ${analyses.length} matches. Predictions: ${predictionCounts[1]} Home Wins | ${predictionCounts.X} Draws | ${predictionCounts[2]} Away Wins</span>
-    </div>
-
-    <div class="data-controls">
-      <button class="control-btn export-btn" onclick="exportMatchData()">📥 Export Data</button>
-      <button class="control-btn copy-btn" onclick="copyToClipboard()">📋 Copy Data</button>
-      <button class="control-btn import-btn" onclick="toggleImportPanel()">📤 Import Data</button>
-      <button class="control-btn clear-btn" onclick="clearAllData()">🗑️ Clear History</button>
-    </div>
-
-    <div id="import-panel" class="import-panel hidden">
-      <textarea id="import-textarea" placeholder="Paste JSON data here..." style="width: 100%; height: 150px; margin-bottom: 10px;"></textarea>
-      <div style="display: flex; gap: 10px;">
-        <button onclick="importFromText()">Import from Text</button>
-        <button class="secondary-btn" onclick="toggleImportPanel()">Cancel</button>
-      </div>
-    </div>
-
-    <div class="match-grid">
-  `;
-
-  analyses.forEach((analysis, idx) => {
-    const predBadgeClass = analysis.prediction === '1' ? '' : analysis.prediction === 'X' ? 'draw' : 'away';
-    const predLabel = analysis.prediction === '1' ? 'HOME WIN' : analysis.prediction === 'X' ? 'DRAW' : 'AWAY WIN';
-
-    let h2hHTML = '';
-    if (analysis.h2h) {
-      h2hHTML = `
-        <div class="h2h-section">
-          <strong>Head-to-Head (${analysis.h2h.matches} matches)</strong>
-          <div class="h2h-stats">
-            <span>${analysis.h2h.homeWins}W</span>
-            <span>${analysis.h2h.draws}D</span>
-            <span>${analysis.h2h.homeWinRate}%</span>
+          <div class="result-section">
+            <div class="result-inputs">
+              <select id="home-goals-${idx}" class="goal-select">
+                <option value="">Home Goals</option>
+                ${Array.from({ length: 8 }, (_, i) => `<option value="i">{i}</option>`).join('')}
+              </select>
+              <span class="vs-text">-</span>
+              <select id="away-goals-${idx}" class="goal-select">
+                <option value="">Away Goals</option>
+                ${Array.from({ length: 8 }, (_, i) => `<option value="i">{i}</option>`).join('')}
+              </select>
+            </div>
+            <button class="save-result-btn" onclick="VFLBrain.captureResult(${idx})">Log Game Output</button>
           </div>
         </div>
       `;
-    }
+    });
 
-    let statsHTML = '';
-    if (analysis.homeStats && analysis.awayStats) {
-      statsHTML = `
-        <div class="team-stats">
-          <div class="stat-col">
-            <small>${analysis.home} (Home)</small>
-            <div>W: ${analysis.homeStats.wins} D: ${analysis.homeStats.draws} L: ${analysis.homeStats.losses}</div>
-            <div class="stat-detail">Avg: ${analysis.homeStats.avgGoalsFor} GF | ${analysis.homeStats.avgGoalsAgainst} GA</div>
-          </div>
-          <div class="stat-col">
-            <small>${analysis.away} (Away)</small>
-            <div>W: ${analysis.awayStats.wins} D: ${analysis.awayStats.draws} L: ${analysis.awayStats.losses}</div>
-            <div class="stat-detail">Avg: ${analysis.awayStats.avgGoalsFor} GF | ${analysis.awayStats.avgGoalsAgainst} GA</div>
-          </div>
-        </div>
-      `;
-    }
-
-    html += `
-      <div class="match-card" id="card-${idx}">
-        <div class="match-header">
-          <span class="match-title">${analysis.home} vs ${analysis.away}</span>
-          <span class="prediction-badge ${predBadgeClass}">${predLabel}</span>
-        </div>
-
-        <div class="odds-row">
-          <div class="odds-cell">
-            <span class="odds-label">Home Win</span>
-            <span class="odds-value">${analysis.hProb}%</span>
-            <span class="odds-odds">${analysis.homeOdds.toFixed(2)}</span>
-          </div>
-          <div class="odds-cell">
-            <span class="odds-label">Draw</span>
-            <span class="odds-value">${analysis.dProb}%</span>
-            <span class="odds-odds">${analysis.drawOdds.toFixed(2)}</span>
-          </div>
-          <div class="odds-cell">
-            <span class="odds-label">Away Win</span>
-            <span class="odds-value">${analysis.aProb}%</span>
-            <span class="odds-odds">${analysis.awayOdds.toFixed(2)}</span>
-          </div>
-        </div>
-
-        <div class="confidence-text">
-          <strong>Confidence:</strong> ${analysis.confidence}
-          ${analysis.dangerFlag !== 'NONE' ? `<br><strong style="color: #fca5a5;">⚠ ${analysis.dangerFlag}</strong>` : ''}
-        </div>
-
-        ${h2hHTML}
-        ${statsHTML}
-
-        <div class="result-section">
-          <div class="result-title">Match Result</div>
-          <div class="result-inputs">
-            <select id="home-goals-${idx}" class="goal-select">
-              <option value="">Home Goals</option>
-              ${Array.from({ length: 10 }, (_, i) => `<option value="${i}">${i}</option>`)}
-            </select>
-            <span class="vs-text">vs</span>
-            <select id="away-goals-${idx}" class="goal-select">
-              <option value="">Away Goals</option>
-              ${Array.from({ length: 10 }, (_, i) => `<option value="${i}">${i}</option>`)}
-            </select>
-          </div>
-          <button class="save-result-btn" onclick="captureResult(${idx})">Save Result</button>
-        </div>
-      </div>
-    `;
-  });
-
-  html += `</div>`;
-
-  const totalMarginAvg = analyses.reduce((sum, a) => sum + parseFloat(a.totalMargin), 0) / analyses.length;
-
-  html += `
-    <div class="summary-stats">
-      <div class="stat-row">
-        <span class="stat-label">Total Matches</span>
-        <span class="stat-value">${analyses.length}</span>
-      </div>
-      <div class="stat-row">
-        <span class="stat-label">Home Win Predictions</span>
-        <span class="stat-value">${predictionCounts[1]}</span>
-      </div>
-      <div class="stat-row">
-        <span class="stat-label">Draw Predictions</span>
-        <span class="stat-value">${predictionCounts.X}</span>
-      </div>
-      <div class="stat-row">
-        <span class="stat-label">Away Win Predictions</span>
-        <span class="stat-value">${predictionCounts[2]}</span>
-      </div>
-      <div class="stat-row">
-        <span class="stat-label">Avg Bookie Margin</span>
-        <span class="stat-value">${totalMarginAvg.toFixed(2)}%</span>
-      </div>
-    </div>
-  `;
-
-  resultsContent.innerHTML = html;
-  resultsPanel.classList.remove('hidden');
-}
-
-async function captureResult(idx) {
-  const analysis = currentAnalyses[idx];
-  const homeGoalsSelect = $(`home-goals-${idx}`);
-  const awayGoalsSelect = $(`away-goals-${idx}`);
-
-  if (!homeGoalsSelect || !awayGoalsSelect) {
-    showNotification('Result inputs not found', 'error');
-    return;
+    html += '</div>';
+    resultsContent.innerHTML = html;
+    resultsPanel.classList.remove('hidden');
   }
 
-  const homeGoals = parseInt(homeGoalsSelect.value, 10);
-  const awayGoals = parseInt(awayGoalsSelect.value, 10);
+  // =========================================================================
+  // Result Logging Strategy Processor
+  // =========================================================================
+  async function captureResult(idx) {
+    const analysis = currentAnalyses[idx];
+    const hG = parseInt(\$(`home-goals-${idx}`).value, 10);
+    const aG = parseInt(\$(`away-goals-${idx}`).value, 10);
 
-  if (Number.isNaN(homeGoals) || Number.isNaN(awayGoals)) {
-    showNotification('Please select both home and away goals', 'error');
-    return;
-  }
+    if (isNaN(hG) || isNaN(aG)) {
+      alert('Please define valid goals parameters to calculate matching outcomes.');
+      return;
+    }
 
-  const result = homeGoals > awayGoals ? '1' : homeGoals < awayGoals ? '2' : 'X';
+    const empiricalOutcome = hG > aG ? '1' : hG === aG ? 'X' : '2';
 
-  const matchRecord = normalizeMatchRecord({
-    home: analysis.home,
-    away: analysis.away,
-    homeTier: analysis.homeTier,
-    awayTier: analysis.awayTier,
-    homeOdds: analysis.homeOdds,
-    drawOdds: analysis.drawOdds,
-    awayOdds: analysis.awayOdds,
-    prediction: analysis.prediction,
-    actualHomeGoals: homeGoals,
-    actualAwayGoals: awayGoals,
-    result,
-    totalGoals: homeGoals + awayGoals,
-    timestamp: new Date().toISOString(),
-    matchup: `${analysis.home} vs ${analysis.away}`,
-    source: 'local'
-  });
+    const matchRecord = {
+      home: analysis.home,
+      away: analysis.away,
+      homeOdds: analysis.hOdds,
+      drawOdds: analysis.dOdds,
+      awayOdds: analysis.aOdds,
+      oddsCombo: analysis.oddsCombo,
+      actualHomeGoals: hG,
+      actualAwayGoals: aG,
+      result: empiricalOutcome,
+      timestamp: new Date().toISOString()
+    };
 
-  try {
     await saveMatch(matchRecord);
-    homeGoalsSelect.disabled = true;
-    awayGoalsSelect.disabled = true;
-    $(`card-${idx}`).classList.add('result-saved');
-    showNotification(`Result saved: ${analysis.home} ${homeGoals}-${awayGoals} ${analysis.away}`, 'success');
-  } catch (error) {
-    showNotification('Error saving result: ' + error.message, 'error');
-  }
-}
-
-function toggleImportPanel() {
-  const panel = $('import-panel');
-  if (panel) {
-    panel.classList.toggle('hidden');
-  }
-}
-
-async function importFromText() {
-  const textarea = $('import-textarea');
-  if (!textarea || !textarea.value.trim()) {
-    showNotification('Please paste JSON data', 'error');
-    return;
+    \$(`home-goals-${idx}`).disabled = true;
+    \$(`away-goals-${idx}`).disabled = true;
+    \$(`card-${idx}`).style.opacity = '0.5';
+    console.log(`Stored execution output context accurately: Match ID index #${idx}`);
   }
 
-  const success = await importMatchData(textarea.value);
-  if (success) {
-    textarea.value = '';
-    toggleImportPanel();
-  }
-}
+  // =========================================================================
+  // Input Data Processor Engine Hook
+  // =========================================================================
+  async function processInput() {
+    const inputField = \$('data-input');
+    if (!inputField || !inputField.value.trim()) return;
 
-function showError(message) {
-  const resultsPanel = $('results-panel');
-  const resultsContent = $('results-content');
-
-  if (!resultsPanel || !resultsContent) return;
-
-  resultsContent.innerHTML = `
-    <div class="match-banner error-banner">
-      <span>⚠</span>
-      <span>${message}</span>
-    </div>
-  `;
-
-  resultsPanel.classList.remove('hidden');
-}
-
-function showNotification(message, type = 'info') {
-  const notification = document.createElement('div');
-  notification.className = `notification notification-${type}`;
-  notification.textContent = message;
-  document.body.appendChild(notification);
-
-  setTimeout(() => notification.classList.add('show'), 10);
-  setTimeout(() => {
-    notification.classList.remove('show');
-    setTimeout(() => notification.remove(), 300);
-  }, 3000);
-}
-
-async function processInput() {
-  const input = $('data-input');
-  if (!input) return;
-
-  const rawData = input.value;
-
-  try {
-    const matches = parseGameweekData(rawData);
-    const analyses = await Promise.all(
-      matches.map((m, idx) => analyzeFixture(m.home, m.away, m.homeOdds, m.drawOdds, m.awayOdds, idx))
-    );
-    await renderMatches(analyses);
-  } catch (error) {
-    showError(error.message);
-  }
-}
-
-window.VFLBrain = {
-  TEAM_TIERS,
-  VALID_TEAMS,
-  initDB,
-  getAllMatches,
-  getHeadToHead,
-  getTeamStats,
-  saveMatch,
-  exportMatchData,
-  copyToClipboard,
-  importMatchData,
-  clearAllData,
-  parseGameweekData,
-  findTeamMatch,
-  analyzeFixture,
-  processInput,
-  normalizeMatchRecord,
-  makeMatchKey
-};
-
-window.addEventListener('DOMContentLoaded', async () => {
-  const parseBtn = $('parse-btn');
-  const clearBtn = $('clear-btn');
-  const dataInput = $('data-input');
-
-  if (parseBtn) {
-    parseBtn.addEventListener('click', processInput);
-  }
-
-  if (clearBtn) {
-    clearBtn.addEventListener('click', () => {
-      if (dataInput) dataInput.value = '';
-      const resultsPanel = $('results-panel');
-      if (resultsPanel) resultsPanel.classList.add('hidden');
-    });
-  }
-
-  if (dataInput) {
-    dataInput.addEventListener('keydown', (event) => {
-      if (event.ctrlKey && event.key === 'Enter') {
-        processInput();
-      }
-    });
-  }
-
-  if ('serviceWorker' in navigator) {
     try {
-      await navigator.serviceWorker.register('sw.js');
-      console.log('Service Worker registered');
-    } catch (error) {
-      console.log('Service Worker registration failed:', error);
+      const basicFixtures = parseGameweekData(inputField.value);
+      const mlEvaluatedFixtures = await Promise.all(
+        basicFixtures.map((m, idx) => analyzeFixtureML(m.home, m.away, m.homeOdds, m.drawOdds, m.awayOdds, idx))
+      );
+      await renderMatches(mlEvaluatedFixtures);
+    } catch (err) {
+      alert(err.message);
     }
   }
-});
+
+  // Bind infrastructure hooks safely to window space objects
+  window.VFLBrain = {
+    processInput,
+    captureResult
+  };
+
+  window.addEventListener('DOMContentLoaded', () => {
+    const parseBtn = \$('parse-btn');
+    if (parseBtn) parseBtn.addEventListener('click', processInput);
+  });
+})();
+
