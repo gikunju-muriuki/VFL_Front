@@ -1,4 +1,4 @@
-const CACHE_NAME = 'vfl-v12';
+const CACHE_NAME = 'vfl-v13';
 const ASSETS_TO_CACHE = [
   '/',
   '/index.html',
