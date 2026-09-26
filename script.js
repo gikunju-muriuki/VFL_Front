@@ -263,8 +263,8 @@
   // Interface Visual Renderer Engine Component
   // =========================================================================
   async function renderMatches(analyses) {
-    const resultsPanel = \$('results-panel');
-    const resultsContent = \$('results-content');
+    const resultsPanel = $('results-panel');
+    const resultsContent = $('results-content');
     if (!resultsPanel || !resultsContent) return;
 
     currentAnalyses = analyses;
@@ -309,12 +309,12 @@
             <div class="result-inputs">
               <select id="home-goals-${idx}" class="goal-select">
                 <option value="">Home Goals</option>
-                ${Array.from({ length: 8 }, (_, i) => `<option value="i">{i}</option>`).join('')}
+                ${Array.from({ length: 8 }, (_, i) => `<option value="${i}">${i}</option>`).join('')}
               </select>
               <span class="vs-text">-</span>
               <select id="away-goals-${idx}" class="goal-select">
                 <option value="">Away Goals</option>
-                ${Array.from({ length: 8 }, (_, i) => `<option value="i">{i}</option>`).join('')}
+                ${Array.from({ length: 8 }, (_, i) => `<option value="${i}">${i}</option>`).join('')}
               </select>
             </div>
             <button class="save-result-btn" onclick="VFLBrain.captureResult(${idx})">Log Game Output</button>
@@ -333,8 +333,8 @@
   // =========================================================================
   async function captureResult(idx) {
     const analysis = currentAnalyses[idx];
-    const hG = parseInt(\$(`home-goals-${idx}`).value, 10);
-    const aG = parseInt(\$(`away-goals-${idx}`).value, 10);
+    const hG = parseInt($(`home-goals-${idx}`).value, 10);
+    const aG = parseInt($(`away-goals-${idx}`).value, 10);
 
     if (isNaN(hG) || isNaN(aG)) {
       alert('Please define valid goals parameters to calculate matching outcomes.');
@@ -357,9 +357,9 @@
     };
 
     await saveMatch(matchRecord);
-    \$(`home-goals-${idx}`).disabled = true;
-    \$(`away-goals-${idx}`).disabled = true;
-    \$(`card-${idx}`).style.opacity = '0.5';
+    $(`home-goals-${idx}`).disabled = true;
+    $(`away-goals-${idx}`).disabled = true;
+    $(`card-${idx}`).style.opacity = '0.5';
     console.log(`Stored execution output context accurately: Match ID index #${idx}`);
   }
 
@@ -367,7 +367,7 @@
   // Input Data Processor Engine Hook
   // =========================================================================
   async function processInput() {
-    const inputField = \$('data-input');
+    const inputField = $('data-input');
     if (!inputField || !inputField.value.trim()) return;
 
     try {
@@ -388,7 +388,7 @@
   };
 
   window.addEventListener('DOMContentLoaded', () => {
-    const parseBtn = \(('#parse-btn') \vert{}\vert{} \)('parse-btn');
+    const parseBtn = $('parse-btn');
     if (parseBtn) parseBtn.addEventListener('click', processInput);
   });
 })();
