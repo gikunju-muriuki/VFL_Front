@@ -24,28 +24,54 @@ const TEAM_TIERS = {
 const VALID_TEAMS = Object.keys(TEAM_TIERS).sort();
 const $ = (id) => document.getElementById(id);
 
-// ============================================================================
-// DATABASE LAYER - IndexedDB for historical match data
-// ============================================================================
-
 const DB_CONFIG = {
   name: 'VFL_MatchHistory',
   version: 1,
   store: 'matches'
 };
 
-/**
- * Initialize IndexedDB database
- */
+function normalizeMatchRecord(match = {}) {
+  const home = match.home || match.homeTeam || '';
+  const away = match.away || match.awayTeam || '';
+  const actualHomeGoals = Number(match.actualHomeGoals ?? match.home_goals ?? 0);
+  const actualAwayGoals = Number(match.actualAwayGoals ?? match.away_goals ?? 0);
+  const result = match.result || (() => {
+    if (actualHomeGoals === actualAwayGoals) return 'X';
+    return actualHomeGoals > actualAwayGoals ? '1' : '2';
+  })();
+
+  return {
+    ...match,
+    home,
+    away,
+    actualHomeGoals,
+    actualAwayGoals,
+    result,
+    totalGoals: actualHomeGoals + actualAwayGoals,
+    matchup: match.matchup || `${home} vs ${away}`,
+    timestamp: match.timestamp || match.saved_at || new Date().toISOString(),
+    source: match.source || 'local'
+  };
+}
+
+function makeMatchKey(match = {}) {
+  const home = match.home || match.homeTeam || '';
+  const away = match.away || match.awayTeam || '';
+  const hGoals = Number(match.actualHomeGoals ?? match.home_goals ?? 0);
+  const aGoals = Number(match.actualAwayGoals ?? match.away_goals ?? 0);
+  const when = match.timestamp || match.saved_at || '';
+  return `${home}|${away}|${hGoals}|${aGoals}|${when}`;
+}
+
 async function initDB() {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_CONFIG.name, DB_CONFIG.version);
-    
+
     request.onerror = () => reject(request.error);
     request.onsuccess = () => resolve(request.result);
-    
-    request.onupgradeneeded = (e) => {
-      const db = e.target.result;
+
+    request.onupgradeneeded = (event) => {
+      const db = event.target.result;
       if (!db.objectStoreNames.contains(DB_CONFIG.store)) {
         const store = db.createObjectStore(DB_CONFIG.store, { keyPath: 'id', autoIncrement: true });
         store.createIndex('matchup', 'matchup', { unique: false });
@@ -57,17 +83,16 @@ async function initDB() {
   });
 }
 
-/**
- * Save a match result to IndexedDB
- */
 async function saveMatch(matchData) {
   try {
     const db = await initDB();
+    const normalized = normalizeMatchRecord(matchData);
+
     return new Promise((resolve, reject) => {
       const tx = db.transaction(DB_CONFIG.store, 'readwrite');
       const store = tx.objectStore(DB_CONFIG.store);
-      
-      const request = store.add(matchData);
+      const request = store.add(normalized); 
+
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -77,9 +102,6 @@ async function saveMatch(matchData) {
   }
 }
 
-/**
- * Get all matches from IndexedDB
- */
 async function getAllMatches() {
   try {
     const db = await initDB();
@@ -87,8 +109,8 @@ async function getAllMatches() {
       const tx = db.transaction(DB_CONFIG.store, 'readonly');
       const store = tx.objectStore(DB_CONFIG.store);
       const request = store.getAll();
-      
-      request.onsuccess = () => resolve(request.result);
+
+      request.onsuccess = () => resolve((request.result || []).map(normalizeMatchRecord));
       request.onerror = () => reject(request.error);
     });
   } catch (error) {
@@ -97,14 +119,11 @@ async function getAllMatches() {
   }
 }
 
-/**
- * Get head-to-head matches between two teams
- */
 async function getHeadToHead(team1, team2) {
   try {
     const allMatches = await getAllMatches();
-    return allMatches.filter(m => 
-      (m.home === team1 && m.away === team2) || 
+    return allMatches.filter(m =>
+      (m.home === team1 && m.away === team2) ||
       (m.home === team2 && m.away === team1)
     );
   } catch (error) {
@@ -113,14 +132,11 @@ async function getHeadToHead(team1, team2) {
   }
 }
 
-/**
- * Get team performance stats
- */
 async function getTeamStats(teamName, venue = null) {
   try {
     const allMatches = await getAllMatches();
     let matches = [];
-    
+
     if (venue === 'home') {
       matches = allMatches.filter(m => m.home === teamName && m.result);
     } else if (venue === 'away') {
@@ -128,7 +144,7 @@ async function getTeamStats(teamName, venue = null) {
     } else {
       matches = allMatches.filter(m => (m.home === teamName || m.away === teamName) && m.result);
     }
-    
+
     if (matches.length === 0) {
       return {
         matches: 0,
@@ -142,25 +158,25 @@ async function getTeamStats(teamName, venue = null) {
         prediction: null
       };
     }
-    
+
     let wins = 0, draws = 0, losses = 0;
     let goalsFor = 0, goalsAgainst = 0, cleanSheets = 0;
-    
+
     matches.forEach(m => {
       const isHome = m.home === teamName;
       const teamGoals = isHome ? m.actualHomeGoals : m.actualAwayGoals;
       const opponentGoals = isHome ? m.actualAwayGoals : m.actualHomeGoals;
-      
+
       goalsFor += teamGoals;
       goalsAgainst += opponentGoals;
-      
+
       if (teamGoals > opponentGoals) wins++;
       else if (teamGoals === opponentGoals) draws++;
       else losses++;
-      
+
       if (opponentGoals === 0) cleanSheets++;
     });
-    
+
     return {
       matches: matches.length,
       wins,
@@ -178,9 +194,6 @@ async function getTeamStats(teamName, venue = null) {
   }
 }
 
-/**
- * Export all match data as JSON
- */
 async function exportMatchData() {
   try {
     const allMatches = await getAllMatches();
@@ -198,9 +211,6 @@ async function exportMatchData() {
   }
 }
 
-/**
- * Copy match data to clipboard
- */
 async function copyToClipboard() {
   try {
     const allMatches = await getAllMatches();
@@ -212,29 +222,38 @@ async function copyToClipboard() {
   }
 }
 
-/**
- * Import match data from JSON
- */
 async function importMatchData(jsonString) {
   try {
     const data = JSON.parse(jsonString);
-    if (!Array.isArray(data)) {
+    const matches = Array.isArray(data) ? data : Array.isArray(data.matches) ? data.matches : [];
+    if (!matches.length) {
       throw new Error('Invalid format: Expected an array of matches');
     }
-    
+
     const db = await initDB();
     const tx = db.transaction(DB_CONFIG.store, 'readwrite');
     const store = tx.objectStore(DB_CONFIG.store);
-    
+
+    const existing = await getAllMatches();
+    const seen = new Set(existing.map(makeMatchKey));
     let count = 0;
-    for (const match of data) {
+
+    for (const match of matches) {
+      const normalized = normalizeMatchRecord(match);
+      const key = makeMatchKey(normalized);
+      if (seen.has(key)) continue;
+
       await new Promise((resolve, reject) => {
-        const request = store.add(match);
-        request.onsuccess = () => { count++; resolve(); };
+        const request = store.add(normalized);
+        request.onsuccess = () => {
+          seen.add(key);
+          count += 1;
+          resolve();
+        };
         request.onerror = () => reject(request.error);
       });
     }
-    
+
     showNotification(`Imported ${count} matches successfully!`, 'success');
     return true;
   } catch (error) {
@@ -243,19 +262,16 @@ async function importMatchData(jsonString) {
   }
 }
 
-/**
- * Clear all match data
- */
 async function clearAllData() {
   if (!confirm('Are you sure? This will delete ALL stored match data.')) return;
-  
+
   try {
     const db = await initDB();
     return new Promise((resolve) => {
       const tx = db.transaction(DB_CONFIG.store, 'readwrite');
       const store = tx.objectStore(DB_CONFIG.store);
       const request = store.clear();
-      
+
       request.onsuccess = () => {
         showNotification('All match data cleared!', 'success');
         resolve(true);
@@ -266,14 +282,6 @@ async function clearAllData() {
   }
 }
 
-// ============================================================================
-// PARSING LAYER - Team and odds extraction
-// ============================================================================
-
-/**
- * Smart parser for betting data
- * Intelligently extracts matches, teams, and odds regardless of formatting
- */
 function parseGameweekData(rawText) {
   if (!rawText || typeof rawText !== 'string') {
     throw new Error('No data provided');
@@ -296,7 +304,7 @@ function parseGameweekData(rawText) {
     const potentialAway = lines[i + 1];
 
     if (!potentialHome || !potentialAway) {
-      i++;
+      i += 1;
       continue;
     }
 
@@ -304,7 +312,7 @@ function parseGameweekData(rawText) {
     const awayTeam = findTeamMatch(potentialAway);
 
     if (!homeTeam || !awayTeam || homeTeam === awayTeam) {
-      i++;
+      i += 1;
       continue;
     }
 
@@ -315,40 +323,28 @@ function parseGameweekData(rawText) {
 
     while (oddsArray.length < 6 && j < lines.length) {
       const line = lines[j];
-      
+
       if (line === '1' || line === 'X' || line === '2') {
-        j++;
+        j += 1;
         continue;
       }
 
       const num = parseFloat(line);
       if (!isNaN(num) && num > 1 && num < 1000) {
         oddsArray.push(num);
-        j++;
+        j += 1;
         if (oddsArray.length === 6) break;
       } else {
-        j++;
+        j += 1;
       }
     }
 
     if (oddsArray.length === 6) {
-      const [homeOdds, drawOdds, awayOdds] = [
-        oddsArray[0],
-        oddsArray[1],
-        oddsArray[2]
-      ];
-
-      matches.push({
-        home: homeTeam,
-        away: awayTeam,
-        homeOdds,
-        drawOdds,
-        awayOdds,
-      });
-
+      const [homeOdds, drawOdds, awayOdds] = [oddsArray[0], oddsArray[1], oddsArray[2]];
+      matches.push({ home: homeTeam, away: awayTeam, homeOdds, drawOdds, awayOdds });
       i = j;
     } else {
-      i++;
+      i += 1;
     }
   }
 
@@ -359,23 +355,16 @@ function parseGameweekData(rawText) {
   return matches;
 }
 
-/**
- * Fuzzy team matching to handle variations
- */
 function findTeamMatch(input) {
   const normalized = input.toLowerCase().trim();
 
   for (const team of VALID_TEAMS) {
-    if (team.toLowerCase() === normalized) {
-      return team;
-    }
+    if (team.toLowerCase() === normalized) return team;
   }
 
   for (const team of VALID_TEAMS) {
     const teamLower = team.toLowerCase();
-    if (teamLower.includes(normalized) || normalized.includes(teamLower)) {
-      return team;
-    }
+    if (teamLower.includes(normalized) || normalized.includes(teamLower)) return team;
   }
 
   let closestTeam = null;
@@ -392,9 +381,6 @@ function findTeamMatch(input) {
   return closestTeam;
 }
 
-/**
- * Calculate Levenshtein distance for fuzzy matching
- */
 function levenshteinDistance(a, b) {
   const matrix = Array(b.length + 1)
     .fill(null)
@@ -417,15 +403,7 @@ function levenshteinDistance(a, b) {
   return matrix[b.length][a.length];
 }
 
-// ============================================================================
-// ANALYSIS LAYER - Fixture analysis with historical blending
-// ============================================================================
-
-/**
- * Analyze a single fixture with historical context
- */
 async function analyzeFixture(home, away, hOdds, dOdds, aOdds, idx) {
-  // Base probability calculation
   const rawHProb = 1 / hOdds;
   const rawDProb = 1 / dOdds;
   const rawAProb = 1 / aOdds;
@@ -439,60 +417,49 @@ async function analyzeFixture(home, away, hOdds, dOdds, aOdds, idx) {
   const awayTier = TEAM_TIERS[away];
   const tierDifferential = awayTier - homeTier;
 
-  // Fetch historical data
   const h2h = await getHeadToHead(home, away);
   const homeStats = await getTeamStats(home, 'home');
   const awayStats = await getTeamStats(away, 'away');
 
-  // Base prediction logic (from Python)
-  let prediction = "";
-  let confidence = "";
-  let dangerFlag = "NONE";
+  let prediction = '';
+  let confidence = '';
+  let dangerFlag = 'NONE';
 
   if (hOdds <= 1.45 || aOdds <= 1.45) {
-    prediction = hOdds <= 1.45 ? "1" : "2";
-    confidence = "MEDIUM-LOW (High Upset Probability)";
-    dangerFlag = "CRITICAL: Heavy favorite detected. High probability of upset or stalemate.";
+    prediction = hOdds <= 1.45 ? '1' : '2';
+    confidence = 'MEDIUM-LOW (High Upset Probability)';
+    dangerFlag = 'CRITICAL: Heavy favorite detected. High probability of upset or stalemate.';
   } else if (hOdds < dOdds && hOdds < aOdds && tierDifferential >= 1) {
-    if (hOdds <= 1.85) {
-      prediction = "1";
-      confidence = "HIGH";
-    } else {
-      prediction = "1";
-      confidence = "MEDIUM";
-    }
+    prediction = '1';
+    confidence = hOdds <= 1.85 ? 'HIGH' : 'MEDIUM';
   } else if (aOdds < dOdds && aOdds < hOdds && tierDifferential <= -1) {
-    if (aOdds <= 1.85) {
-      prediction = "2";
-      confidence = "HIGH";
-    } else {
-      prediction = "2";
-      confidence = "MEDIUM";
-    }
+    prediction = '2';
+    confidence = aOdds <= 1.85 ? 'HIGH' : 'MEDIUM';
   } else {
-    prediction = "X";
-    confidence = "MEDIUM";
-    dangerFlag = "BALANCED MARKET: Draw profile detected.";
+    prediction = 'X';
+    confidence = 'MEDIUM';
+    dangerFlag = 'BALANCED MARKET: Draw profile detected.';
   }
 
-  // Calculate historical confidence boost
   let historicalAccuracy = null;
   let h2hResult = null;
+
   if (h2h.length > 0) {
     const h2hCorrect = h2h.filter(m => {
-      // Determine prediction for that match based on its odds
-      const expectedResult = calculateExpectedResult(m.home === home ? m.homeOdds : m.awayOdds,
-                                                      m.drawOdds, 
-                                                      m.home === home ? m.awayOdds : m.homeOdds);
+      const expectedResult = calculateExpectedResult(
+        m.home === home ? m.homeOdds : m.awayOdds,
+        m.drawOdds,
+        m.home === home ? m.awayOdds : m.homeOdds
+      );
       return expectedResult === m.result;
     }).length;
-    
+
     historicalAccuracy = (h2hCorrect / h2h.length * 100).toFixed(0);
-    
-    // Summarize H2H pattern
+
     const h2hHome = h2h.filter(m => m.home === home);
     const h2hHomeWins = h2hHome.filter(m => m.result === '1').length;
     const h2hHomeDraws = h2hHome.filter(m => m.result === 'X').length;
+
     h2hResult = {
       matches: h2h.length,
       homeWins: h2hHomeWins,
@@ -518,7 +485,6 @@ async function analyzeFixture(home, away, hOdds, dOdds, aOdds, idx) {
     homeOdds: hOdds,
     drawOdds: dOdds,
     awayOdds: aOdds,
-    // Historical context
     h2h: h2hResult,
     homeStats,
     awayStats,
@@ -526,38 +492,27 @@ async function analyzeFixture(home, away, hOdds, dOdds, aOdds, idx) {
   };
 }
 
-/**
- * Calculate expected result based on odds
- */
 function calculateExpectedResult(homeOdds, drawOdds, awayOdds) {
   if (homeOdds <= 1.45 || awayOdds <= 1.45) {
-    return homeOdds <= 1.45 ? "1" : "2";
+    return homeOdds <= 1.45 ? '1' : '2';
   } else if (homeOdds < drawOdds && homeOdds < awayOdds) {
-    return "1";
+    return '1';
   } else if (awayOdds < drawOdds && awayOdds < homeOdds) {
-    return "2";
+    return '2';
   }
-  return "X";
+  return 'X';
 }
-
-// ============================================================================
-// RENDERING LAYER - Display predictions and capture results
-// ============================================================================
 
 let currentAnalyses = [];
 
-/**
- * Render match cards with result capture interface
- */
 async function renderMatches(analyses) {
-  const resultsPanel = $("results-panel");
-  const resultsContent = $("results-content");
+  const resultsPanel = $('results-panel');
+  const resultsContent = $('results-content');
 
   if (!resultsPanel || !resultsContent) return;
 
   currentAnalyses = analyses;
 
-  // Count predictions
   const predictionCounts = { 1: 0, X: 0, 2: 0 };
   analyses.forEach(a => predictionCounts[a.prediction]++);
 
@@ -585,10 +540,9 @@ async function renderMatches(analyses) {
     <div class="match-grid">
   `;
 
-  // Render all match cards
   analyses.forEach((analysis, idx) => {
-    const predBadgeClass = analysis.prediction === "1" ? "" : analysis.prediction === "X" ? "draw" : "away";
-    const predLabel = analysis.prediction === "1" ? "HOME WIN" : analysis.prediction === "X" ? "DRAW" : "AWAY WIN";
+    const predBadgeClass = analysis.prediction === '1' ? '' : analysis.prediction === 'X' ? 'draw' : 'away';
+    const predLabel = analysis.prediction === '1' ? 'HOME WIN' : analysis.prediction === 'X' ? 'DRAW' : 'AWAY WIN';
 
     let h2hHTML = '';
     if (analysis.h2h) {
@@ -649,7 +603,7 @@ async function renderMatches(analyses) {
 
         <div class="confidence-text">
           <strong>Confidence:</strong> ${analysis.confidence}
-          ${analysis.dangerFlag !== "NONE" ? `<br><strong style="color: #fca5a5;">⚠ ${analysis.dangerFlag}</strong>` : ""}
+          ${analysis.dangerFlag !== 'NONE' ? `<br><strong style="color: #fca5a5;">⚠ ${analysis.dangerFlag}</strong>` : ''}
         </div>
 
         ${h2hHTML}
@@ -660,12 +614,12 @@ async function renderMatches(analyses) {
           <div class="result-inputs">
             <select id="home-goals-${idx}" class="goal-select">
               <option value="">Home Goals</option>
-              ${Array.from({length: 10}, (_, i) => `<option value="${i}">${i}</option>`)}
+              ${Array.from({ length: 10 }, (_, i) => `<option value="${i}">${i}</option>`)}
             </select>
             <span class="vs-text">vs</span>
             <select id="away-goals-${idx}" class="goal-select">
               <option value="">Away Goals</option>
-              ${Array.from({length: 10}, (_, i) => `<option value="${i}">${i}</option>`)}
+              ${Array.from({ length: 10 }, (_, i) => `<option value="${i}">${i}</option>`)}
             </select>
           </div>
           <button class="save-result-btn" onclick="captureResult(${idx})">Save Result</button>
@@ -676,7 +630,6 @@ async function renderMatches(analyses) {
 
   html += `</div>`;
 
-  // Summary stats
   const totalMarginAvg = analyses.reduce((sum, a) => sum + parseFloat(a.totalMargin), 0) / analyses.length;
 
   html += `
@@ -705,12 +658,9 @@ async function renderMatches(analyses) {
   `;
 
   resultsContent.innerHTML = html;
-  resultsPanel.classList.remove("hidden");
+  resultsPanel.classList.remove('hidden');
 }
 
-/**
- * Capture match result and save to database
- */
 async function captureResult(idx) {
   const analysis = currentAnalyses[idx];
   const homeGoalsSelect = $(`home-goals-${idx}`);
@@ -721,17 +671,17 @@ async function captureResult(idx) {
     return;
   }
 
-  const homeGoals = parseInt(homeGoalsSelect.value);
-  const awayGoals = parseInt(awayGoalsSelect.value);
+  const homeGoals = parseInt(homeGoalsSelect.value, 10);
+  const awayGoals = parseInt(awayGoalsSelect.value, 10);
 
-  if (isNaN(homeGoals) || isNaN(awayGoals)) {
+  if (Number.isNaN(homeGoals) || Number.isNaN(awayGoals)) {
     showNotification('Please select both home and away goals', 'error');
     return;
   }
 
   const result = homeGoals > awayGoals ? '1' : homeGoals < awayGoals ? '2' : 'X';
 
-  const matchRecord = {
+  const matchRecord = normalizeMatchRecord({
     home: analysis.home,
     away: analysis.away,
     homeTier: analysis.homeTier,
@@ -745,8 +695,9 @@ async function captureResult(idx) {
     result,
     totalGoals: homeGoals + awayGoals,
     timestamp: new Date().toISOString(),
-    matchup: `${analysis.home} vs ${analysis.away}`
-  };
+    matchup: `${analysis.home} vs ${analysis.away}`,
+    source: 'local'
+  });
 
   try {
     await saveMatch(matchRecord);
@@ -759,9 +710,6 @@ async function captureResult(idx) {
   }
 }
 
-/**
- * Show/hide import panel
- */
 function toggleImportPanel() {
   const panel = $('import-panel');
   if (panel) {
@@ -769,9 +717,6 @@ function toggleImportPanel() {
   }
 }
 
-/**
- * Import data from text input
- */
 async function importFromText() {
   const textarea = $('import-textarea');
   if (!textarea || !textarea.value.trim()) {
@@ -786,12 +731,9 @@ async function importFromText() {
   }
 }
 
-/**
- * Show error banner
- */
 function showError(message) {
-  const resultsPanel = $("results-panel");
-  const resultsContent = $("results-content");
+  const resultsPanel = $('results-panel');
+  const resultsContent = $('results-content');
 
   if (!resultsPanel || !resultsContent) return;
 
@@ -802,12 +744,9 @@ function showError(message) {
     </div>
   `;
 
-  resultsPanel.classList.remove("hidden");
+  resultsPanel.classList.remove('hidden');
 }
 
-/**
- * Show notification toast
- */
 function showNotification(message, type = 'info') {
   const notification = document.createElement('div');
   notification.className = `notification notification-${type}`;
@@ -821,15 +760,8 @@ function showNotification(message, type = 'info') {
   }, 3000);
 }
 
-// ============================================================================
-// MAIN PROCESSING
-// ============================================================================
-
-/**
- * Main parse and analyze function
- */
 async function processInput() {
-  const input = $("data-input");
+  const input = $('data-input');
   if (!input) return;
 
   const rawData = input.value;
@@ -837,9 +769,7 @@ async function processInput() {
   try {
     const matches = parseGameweekData(rawData);
     const analyses = await Promise.all(
-      matches.map((m, idx) =>
-        analyzeFixture(m.home, m.away, m.homeOdds, m.drawOdds, m.awayOdds, idx)
-      )
+      matches.map((m, idx) => analyzeFixture(m.home, m.away, m.homeOdds, m.drawOdds, m.awayOdds, idx))
     );
     await renderMatches(analyses);
   } catch (error) {
@@ -847,35 +777,51 @@ async function processInput() {
   }
 }
 
-/**
- * Initialize event listeners
- */
-window.addEventListener("DOMContentLoaded", async () => {
-  const parseBtn = $("parse-btn");
-  const clearBtn = $("clear-btn");
-  const dataInput = $("data-input");
+window.VFLBrain = {
+  TEAM_TIERS,
+  VALID_TEAMS,
+  initDB,
+  getAllMatches,
+  getHeadToHead,
+  getTeamStats,
+  saveMatch,
+  exportMatchData,
+  copyToClipboard,
+  importMatchData,
+  clearAllData,
+  parseGameweekData,
+  findTeamMatch,
+  analyzeFixture,
+  processInput,
+  normalizeMatchRecord,
+  makeMatchKey
+};
+
+window.addEventListener('DOMContentLoaded', async () => {
+  const parseBtn = $('parse-btn');
+  const clearBtn = $('clear-btn');
+  const dataInput = $('data-input');
 
   if (parseBtn) {
-    parseBtn.addEventListener("click", processInput);
+    parseBtn.addEventListener('click', processInput);
   }
 
   if (clearBtn) {
-    clearBtn.addEventListener("click", () => {
-      if (dataInput) dataInput.value = "";
-      const resultsPanel = $("results-panel");
-      if (resultsPanel) resultsPanel.classList.add("hidden");
+    clearBtn.addEventListener('click', () => {
+      if (dataInput) dataInput.value = '';
+      const resultsPanel = $('results-panel');
+      if (resultsPanel) resultsPanel.classList.add('hidden');
     });
   }
 
   if (dataInput) {
-    dataInput.addEventListener("keydown", (e) => {
-      if (e.ctrlKey && e.key === "Enter") {
+    dataInput.addEventListener('keydown', (event) => {
+      if (event.ctrlKey && event.key === 'Enter') {
         processInput();
       }
     });
   }
 
-  // Register service worker
   if ('serviceWorker' in navigator) {
     try {
       await navigator.serviceWorker.register('sw.js');
