@@ -388,8 +388,7 @@
   };
 
   window.addEventListener('DOMContentLoaded', () => {
-    const parseBtn = \$('parse-btn');
+    const parseBtn = \(('#parse-btn') \vert{}\vert{} \)('parse-btn');
     if (parseBtn) parseBtn.addEventListener('click', processInput);
   });
 })();
-
