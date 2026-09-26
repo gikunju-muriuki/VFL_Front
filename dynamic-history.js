@@ -1,27 +1,16 @@
-/*
- * Dynamic history bridge.
- *
- * This file keeps the app working with IndexedDB by default, while allowing
- * optional server syncing when a backend API is available later.
- *
- * Example configuration:
- *   localStorage.setItem('VFL_HISTORY_API', 'https://your-host.example/api');
- *
- * Expected API (optional):
- *   GET /matches  -> [{...}, {...}] or { matches: [...] }
- *   POST /matches -> { ...match } record
- */
 (() => {
   'use strict';
 
-  const API_KEY = 'VFL_HISTORY_API';
   const DB_NAME = 'VFL_MatchHistory';
   const STORE_NAME = 'matches';
-  const DEFAULT_API = '/api';
 
-  const apiBase = () => {
-    const raw = localStorage.getItem(API_KEY) || DEFAULT_API;
-    return raw.replace(/\/$/, '');
+  const keyFor = (match = {}) => {
+    const home = match.home || match.homeTeam || '';
+    const away = match.away || match.awayTeam || '';
+    const hGoals = Number(match.actualHomeGoals ?? match.home_goals ?? 0);
+    const aGoals = Number(match.actualAwayGoals ?? match.away_goals ?? 0);
+    const when = match.timestamp || match.saved_at || '';
+    return `${home}|${away}|${hGoals}|${aGoals}|${when}`;
   };
 
   const openHistoryDb = () => new Promise((resolve, reject) => {
@@ -40,132 +29,146 @@
     };
   });
 
+  const normalizeStoredMatch = (match = {}) => {
+    const home = match.home || match.homeTeam || '';
+    const away = match.away || match.awayTeam || '';
+    const actualHomeGoals = Number(match.actualHomeGoals ?? match.home_goals ?? 0);
+    const actualAwayGoals = Number(match.actualAwayGoals ?? match.away_goals ?? 0);
+    const result = match.result || (() => {
+      if (actualHomeGoals === actualAwayGoals) return 'X';
+      return actualHomeGoals > actualAwayGoals ? '1' : '2';
+    })();
+
+    return {
+      ...match,
+      home,
+      away,
+      actualHomeGoals,
+      actualAwayGoals,
+      result,
+      totalGoals: actualHomeGoals + actualAwayGoals,
+      matchup: match.matchup || `${home} vs ${away}`,
+      timestamp: match.timestamp || match.saved_at || new Date().toISOString(),
+      source: match.source || 'local'
+    };
+  };
+
   const readLocalMatches = async () => {
     const db = await openHistoryDb();
     return new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readonly');
       const store = tx.objectStore(STORE_NAME);
       const request = store.getAll();
-      request.onsuccess = () => resolve(request.result || []);
+      request.onsuccess = () => resolve((request.result || []).map(normalizeStoredMatch));
       request.onerror = () => reject(request.error);
     });
   };
 
-  const mergeRemoteMatches = async (matches) => {
-    if (!Array.isArray(matches) || !matches.length) return 0;
+  const saveLocalMatch = async (match) => {
+    const db = await openHistoryDb();
+    const normalized = normalizeStoredMatch(match);
+
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      const request = store.add(normalized);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  };
+
+  const mergeLocalMatches = async (incomingMatches) => {
+    if (!Array.isArray(incomingMatches) || !incomingMatches.length) return 0;
+
+    const db = await openHistoryDb();
+    const existing = await readLocalMatches();
+    const seen = new Set(existing.map(item => keyFor(item)));
+    let added = 0;
+
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+
+    return new Promise((resolve, reject) => {
+      incomingMatches.forEach(match => {
+        const normalized = normalizeStoredMatch(match);
+        const lookupKey = keyFor(normalized);
+
+        if (seen.has(lookupKey)) return;
+
+        const request = store.add(normalized);
+        request.onsuccess = () => {
+          seen.add(lookupKey);
+          added += 1;
+        };
+        request.onerror = () => reject(request.error);
+      });
+
+      tx.oncomplete = () => resolve(added);
+      tx.onerror = () => reject(tx.error);
+    });
+  };
+
+  const clearLocalHistory = async () => {
     const db = await openHistoryDb();
     return new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readwrite');
       const store = tx.objectStore(STORE_NAME);
-      let added = 0;
-      const seen = new Set();
-
-      const keyFor = (match) => {
-        const home = match.home || match.homeTeam || '';
-        const away = match.away || match.awayTeam || '';
-        const hGoals = Number(match.actualHomeGoals ?? match.home_goals ?? 0);
-        const aGoals = Number(match.actualAwayGoals ?? match.away_goals ?? 0);
-        const when = match.timestamp || match.saved_at || '';
-        return `${home}|${away}|${hGoals}|${aGoals}|${when}`;
-      };
-
-      // Avoid duplicates from repeated pulls.
-      readLocalMatches().then(existing => {
-        existing.forEach(item => seen.add(keyFor(item)));
-        matches.forEach(match => {
-          const key = keyFor(match);
-          if (seen.has(key)) return;
-          const normalized = {
-            ...match,
-            home: match.home || match.homeTeam,
-            away: match.away || match.awayTeam,
-            actualHomeGoals: Number(match.actualHomeGoals ?? match.home_goals ?? 0),
-            actualAwayGoals: Number(match.actualAwayGoals ?? match.away_goals ?? 0),
-            result: match.result || (() => {
-              const h = Number(match.actualHomeGoals ?? match.home_goals ?? 0);
-              const a = Number(match.actualAwayGoals ?? match.away_goals ?? 0);
-              return h === a ? 'X' : h > a ? '1' : '2';
-            })(),
-            matchup: match.matchup || `${match.home || match.homeTeam} vs ${match.away || match.awayTeam}`,
-            timestamp: match.timestamp || match.saved_at || new Date().toISOString(),
-            source: 'server'
-          };
-
-          const req = store.add(normalized);
-          req.onsuccess = () => {
-            seen.add(key);
-            added += 1;
-          };
-        });
-
-        tx.oncomplete = () => resolve(added);
-        tx.onerror = () => reject(tx.error);
-      }).catch(reject);
+      const request = store.clear();
+      request.onsuccess = () => resolve(true);
+      request.onerror = () => reject(request.error);
     });
   };
 
-  const loadRemoteHistory = async () => {
-    try {
-      const response = await fetch(`${apiBase()}/matches`, {
-        headers: { Accept: 'application/json' }
-      });
-      if (!response.ok) return 0;
-
-      const payload = await response.json();
-      const matches = Array.isArray(payload) ? payload : payload.matches || [];
-      const added = await mergeRemoteMatches(matches);
-
-      if (added && typeof window.showNotification === 'function') {
-        window.showNotification(`Loaded ${added} historical match${added === 1 ? '' : 'es'} from the server`, 'info');
-      }
-      return added;
-    } catch (error) {
-      // Keep the app functioning even if no API is configured.
-      console.info('Remote history unavailable; local history remains active.', error.message);
-      return 0;
-    }
-  };
-
-  const publishMatchToApi = async (match) => {
-    try {
-      const response = await fetch(`${apiBase()}/matches`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify(match)
-      });
-      if (!response.ok) {
-        throw new Error(`History API returned ${response.status}`);
-      }
-    } catch (error) {
-      console.info('Could not sync match to the server history endpoint:', error.message);
-    }
-  };
-
-  const scheduleServerSync = async () => {
+  const exportHistoryAsJson = async () => {
     const matches = await readLocalMatches();
-    const latest = matches[matches.length - 1];
-    if (!latest) return;
-    await publishMatchToApi(latest);
+    return JSON.stringify(matches, null, 2);
   };
 
-  const setupHistoryBridge = () => {
-    window.addEventListener('DOMContentLoaded', () => {
-      // Load server-side history if configured, without blocking the UI.
-      loadRemoteHistory();
+  const importHistoryFromJson = async (jsonText) => {
+    if (!jsonText || typeof jsonText !== 'string') {
+      throw new Error('History data is empty.');
+    }
 
-      // If a Save Result button is clicked, send the newly saved match to the
-      // API in the background. This keeps the prediction engine dynamic while
-      // preserving the local database as the primary source of truth.
-      document.addEventListener('click', (event) => {
-        if (event.target.closest('.save-result-btn')) {
-          setTimeout(scheduleServerSync, 150);
-        }
-      }, true);
+    let parsed;
+    try {
+      parsed = JSON.parse(jsonText);
+    } catch (error) {
+      throw new Error('Invalid JSON history data.');
+    }
+
+    const matches = Array.isArray(parsed) ? parsed : Array.isArray(parsed.matches) ? parsed.matches : [];
+    if (!matches.length) {
+      throw new Error('No match records found in the import data.');
+    }
+
+    return mergeLocalMatches(matches);
+  };
+
+  const setupOfflineHistoryBridge = () => {
+    window.VFLHistory = {
+      DB_NAME,
+      STORE_NAME,
+      openHistoryDb,
+      readLocalMatches,
+      saveLocalMatch,
+      mergeLocalMatches,
+      clearLocalHistory,
+      exportHistoryAsJson,
+      importHistoryFromJson,
+      refreshLocalHistory: readLocalMatches
+    };
+
+    window.refreshLocalHistory = readLocalMatches;
+    window.exportHistory = exportHistoryAsJson;
+    window.importHistory = importHistoryFromJson;
+    window.clearHistoryData = clearLocalHistory;
+
+    window.addEventListener('DOMContentLoaded', () => {
+      if (typeof window.showNotification === 'function') {
+        window.showNotification('Offline history ready: local IndexedDB is active.', 'info');
+      }
     });
   };
 
-  // Expose a manual refresh hook for later use.
-  window.refreshRemoteHistory = loadRemoteHistory;
-
-  setupHistoryBridge();
+  setupOfflineHistoryBridge();
 })();
