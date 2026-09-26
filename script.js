@@ -1,6 +1,7 @@
 /**
  * VFL Match History & Self-Learning Mathematical ML Engine
  * Fully autonomous local data loop utilizing IndexedDB storage
+ * Enhanced with Bulk Results Parser & Import/Export Functionality
  */
 (() => {
   'use strict';
@@ -14,7 +15,7 @@
 
   const DB_CONFIG = {
     name: 'VFL_MatchHistory',
-    version: 2, // Upgraded version to reflect new data profiles
+    version: 2,
     store: 'matches'
   };
 
@@ -69,6 +70,74 @@
     });
   }
 
+  // Clear all records
+  async function clearAllMatches() {
+    const db = await initDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(DB_CONFIG.store, 'readwrite');
+      const store = tx.objectStore(DB_CONFIG.store);
+      const request = store.clear();
+      request.onsuccess = () => resolve(true);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  /**
+   * BULK RESULTS PARSER
+   * Ultra-fast import: paste results in format
+   * Team1
+   * Team2
+   * Goals1
+   * Goals2
+   * Team3
+   * Team4
+   * Goals3
+   * Goals4
+   * ... etc
+   */
+  function parseBulkResults(rawText) {
+    if (!rawText || typeof rawText !== 'string') {
+      throw new Error('No data provided');
+    }
+
+    const lines = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+    const matches = [];
+    let i = 0;
+
+    while (i < lines.length) {
+      if (i + 3 >= lines.length) break;
+
+      const homeTeam = findTeamMatch(lines[i]);
+      const awayTeam = findTeamMatch(lines[i + 1]);
+      const homeGoals = parseInt(lines[i + 2], 10);
+      const awayGoals = parseInt(lines[i + 3], 10);
+
+      if (homeTeam && awayTeam && homeTeam !== awayTeam && !isNaN(homeGoals) && !isNaN(awayGoals)) {
+        const result = homeGoals > awayGoals ? '1' : homeGoals === awayGoals ? 'X' : '2';
+        matches.push({
+          home: homeTeam,
+          away: awayTeam,
+          actualHomeGoals: homeGoals,
+          actualAwayGoals: awayGoals,
+          result: result,
+          timestamp: new Date().toISOString(),
+          homeOdds: 0,
+          drawOdds: 0,
+          awayOdds: 0,
+          oddsCombo: '0|0|0'
+        });
+        i += 4;
+      } else {
+        i++;
+      }
+    }
+
+    if (matches.length === 0) {
+      throw new Error('No valid match results found. Format: Team1\\nTeam2\\nHomeGoals\\nAwayGoals');
+    }
+    return matches;
+  }
+
   /**
    * FIXED BUGGY PARSER
    * Reads data stream sequentially, identifying targets and structural slots safely.
@@ -117,7 +186,7 @@
             drawOdds: collectedOdds[1],
             awayOdds: collectedOdds[2]
           });
-          i = scanIdx; // Advance main loop directly past processed data cluster
+          i = scanIdx;
           continue;
         }
       }
@@ -216,7 +285,6 @@
     if (finalAProb > maxWeight) { prediction = '2'; maxWeight = finalAProb; }
 
     // Risk to Reward calculation (R:R Ratio Evaluation)
-    // Formula: Edge = (Calculated Probability * Multiplier) - 1
     let edge1 = (finalHProb * hOdds) - 1;
     let edgeX = (finalDProb * dOdds) - 1;
     let edge2 = (finalAProb * aOdds) - 1;
@@ -257,6 +325,96 @@
       historicalDrawWinPct: (dynamicDrawRank * 100).toFixed(0),
       historicalAwayWinPct: (dynamicAwayRank * 100).toFixed(0)
     };
+  }
+
+  // =========================================================================
+  // EXPORT/IMPORT & NOTIFICATION SYSTEM
+  // =========================================================================
+  
+  function showNotification(message, type = 'info') {
+    const notification = $('notification');
+    if (!notification) return;
+    
+    notification.textContent = message;
+    notification.className = `notification show notification-${type}`;
+    
+    setTimeout(() => {
+      notification.classList.remove('show');
+    }, 3000);
+  }
+
+  async function exportHistory() {
+    try {
+      const matches = await getAllMatches();
+      const json = JSON.stringify(matches, null, 2);
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `vfl_history_${new Date().toISOString().split('T')[0]}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showNotification(`Exported ${matches.length} matches successfully`, 'success');
+    } catch (err) {
+      showNotification(`Export failed: ${err.message}`, 'error');
+    }
+  }
+
+  async function copyHistoryToClipboard() {
+    try {
+      const matches = await getAllMatches();
+      const json = JSON.stringify(matches, null, 2);
+      await navigator.clipboard.writeText(json);
+      showNotification(`Copied ${matches.length} matches to clipboard`, 'success');
+    } catch (err) {
+      showNotification(`Copy failed: ${err.message}`, 'error');
+    }
+  }
+
+  async function importHistoryFromJson(jsonText) {
+    try {
+      const data = JSON.parse(jsonText);
+      const matches = Array.isArray(data) ? data : data.matches || [];
+      
+      if (!matches.length) {
+        throw new Error('No matches found in JSON');
+      }
+
+      let imported = 0;
+      for (const match of matches) {
+        try {
+          await saveMatch(match);
+          imported++;
+        } catch (err) {
+          // Duplicate or error, skip
+        }
+      }
+
+      showNotification(`Imported ${imported} new matches`, 'success');
+      return imported;
+    } catch (err) {
+      showNotification(`Import failed: ${err.message}`, 'error');
+      throw err;
+    }
+  }
+
+  async function handleFileUpload(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        try {
+          const text = e.target.result;
+          const imported = await importHistoryFromJson(text);
+          resolve(imported);
+        } catch (err) {
+          reject(err);
+        }
+      };
+      reader.onerror = () => reject(new Error('File read failed'));
+      reader.readAsText(file);
+    });
   }
 
   // =========================================================================
@@ -337,7 +495,7 @@
     const aG = parseInt($(`away-goals-${idx}`).value, 10);
 
     if (isNaN(hG) || isNaN(aG)) {
-      alert('Please define valid goals parameters to calculate matching outcomes.');
+      showNotification('Please define valid goals parameters', 'error');
       return;
     }
 
@@ -359,8 +517,8 @@
     await saveMatch(matchRecord);
     $(`home-goals-${idx}`).disabled = true;
     $(`away-goals-${idx}`).disabled = true;
-    $(`card-${idx}`).style.opacity = '0.5';
-    console.log(`Stored execution output context accurately: Match ID index #${idx}`);
+    $(`card-${idx}`).classList.add('result-saved');
+    showNotification(`Match logged: ${analysis.home} ${hG}-${aG} ${analysis.away}`, 'success');
   }
 
   // =========================================================================
@@ -376,19 +534,125 @@
         basicFixtures.map((m, idx) => analyzeFixtureML(m.home, m.away, m.homeOdds, m.drawOdds, m.awayOdds, idx))
       );
       await renderMatches(mlEvaluatedFixtures);
+      showNotification(`Parsed and analyzed ${basicFixtures.length} matches`, 'success');
     } catch (err) {
-      alert(err.message);
+      showNotification(err.message, 'error');
+    }
+  }
+
+  async function processBulkResults() {
+    const inputField = $('data-input');
+    if (!inputField || !inputField.value.trim()) return;
+
+    try {
+      const results = parseBulkResults(inputField.value);
+      let saved = 0;
+      
+      for (const result of results) {
+        await saveMatch(result);
+        saved++;
+      }
+      
+      inputField.value = '';
+      showNotification(`Bulk imported ${saved} match results to history`, 'success');
+    } catch (err) {
+      showNotification(err.message, 'error');
     }
   }
 
   // Bind infrastructure hooks safely to window space objects
   window.VFLBrain = {
     processInput,
-    captureResult
+    processBulkResults,
+    captureResult,
+    exportHistory,
+    copyHistoryToClipboard,
+    importHistoryFromJson,
+    handleFileUpload,
+    showNotification,
+    clearAllMatches
   };
 
   window.addEventListener('DOMContentLoaded', () => {
     const parseBtn = $('parse-btn');
     if (parseBtn) parseBtn.addEventListener('click', processInput);
+
+    const bulkBtn = $('bulk-btn');
+    if (bulkBtn) bulkBtn.addEventListener('click', processBulkResults);
+
+    const exportBtn = $('export-btn');
+    if (exportBtn) exportBtn.addEventListener('click', exportHistory);
+
+    const copyBtn = $('copy-btn');
+    if (copyBtn) copyBtn.addEventListener('click', copyHistoryToClipboard);
+
+    const importToggleBtn = $('import-toggle-btn');
+    const importPanel = $('import-panel');
+    if (importToggleBtn && importPanel) {
+      importToggleBtn.addEventListener('click', () => {
+        importPanel.classList.toggle('hidden');
+      });
+    }
+
+    const pasteImportBtn = $('paste-import-btn');
+    if (pasteImportBtn) {
+      pasteImportBtn.addEventListener('click', async () => {
+        const textarea = $('import-textarea');
+        if (textarea && textarea.value.trim()) {
+          try {
+            await importHistoryFromJson(textarea.value);
+            textarea.value = '';
+            importPanel.classList.add('hidden');
+          } catch (err) {
+            showNotification(`Import error: ${err.message}`, 'error');
+          }
+        }
+      });
+    }
+
+    const importCancelBtn = $('import-cancel-btn');
+    if (importCancelBtn && importPanel) {
+      importCancelBtn.addEventListener('click', () => {
+        importPanel.classList.add('hidden');
+        $('import-textarea').value = '';
+      });
+    }
+
+    const uploadBtn = $('upload-btn');
+    const fileInput = $('import-file-input');
+    if (uploadBtn && fileInput) {
+      uploadBtn.addEventListener('click', () => fileInput.click());
+      fileInput.addEventListener('change', async (e) => {
+        if (e.target.files && e.target.files[0]) {
+          try {
+            await handleFileUpload(e.target.files[0]);
+          } catch (err) {
+            showNotification(`Upload error: ${err.message}`, 'error');
+          }
+          e.target.value = '';
+        }
+      });
+    }
+
+    const clearHistoryBtn = $('clear-history-btn');
+    if (clearHistoryBtn) {
+      clearHistoryBtn.addEventListener('click', async () => {
+        if (confirm('Are you sure you want to clear all match history? This cannot be undone.')) {
+          try {
+            await clearAllMatches();
+            showNotification('All history cleared', 'success');
+          } catch (err) {
+            showNotification(`Clear failed: ${err.message}`, 'error');
+          }
+        }
+      });
+    }
+
+    const clearBtn = $('clear-btn');
+    if (clearBtn) {
+      clearBtn.addEventListener('click', () => {
+        $('data-input').value = '';
+      });
+    }
   });
 })();
