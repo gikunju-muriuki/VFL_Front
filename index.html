@@ -176,11 +176,17 @@
       border: 1px solid rgba(96, 165, 250, 0.3);
       color: #60a5fa;
       border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.2s ease;
     }
 
     .control-btn:hover {
       background: rgba(96, 165, 250, 0.2);
       border-color: rgba(96, 165, 250, 0.6);
+    }
+
+    .control-btn:active {
+      transform: scale(0.98);
     }
 
     .clear-btn {
@@ -698,7 +704,13 @@
         <p style="color: #94a3b8; margin-bottom: 15px; font-size: 0.9rem;">
           <strong>Mode 1 - Predictions:</strong> Paste your betting data from OdiLeague with odds. The algorithm intelligently analyzes each fixture against its tier system and historical data.
           <br><br>
-          <strong>Mode 2 - Bulk Results:</strong> Paste match results in format (Home / Away / HomeGoals / AwayGoals) for fast import. No odds needed.
+          <strong>Mode 2 - Bulk Results (Smart Parser):</strong> Paste match results in ANY of these formats - the algorithm auto-detects:
+          <br>
+          Format A: Home / Away / HomeGoals / AwayGoals
+          <br>
+          Format B: Home / HomeGoals / AwayGoals / Away
+          <br>
+          Supports both! No need to remember the exact order.
         </p>
 
         <textarea id="data-input" placeholder="MODE 1 - Predictions (with odds):
@@ -713,7 +725,7 @@ London Blues
 3.14
 ...
 
-OR MODE 2 - Bulk Results (fast input):
+OR MODE 2 - Bulk Results (ANY format):
 Brighton
 Leeds
 1
@@ -727,7 +739,13 @@ Southampton
 Tottenham
 Liverpool
 1
-4"></textarea>
+4
+
+OR ALTERNATIVE:
+Liverpool
+1
+4
+Tottenham"></textarea>
 
         <div class="button-group">
           <button id="parse-btn" type="button">
