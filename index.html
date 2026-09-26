@@ -690,59 +690,72 @@
         <div class="section-heading">
           <div>
             <p class="eyebrow">01 / INPUT</p>
-            <h2>Paste gameweek data</h2>
+            <h2>Paste gameweek data or bulk results</h2>
           </div>
           <span class="status-pill">SMART PARSE</span>
         </div>
 
         <p style="color: #94a3b8; margin-bottom: 15px; font-size: 0.9rem;">
-          Paste your betting data directly from OdiLeague. The algorithm intelligently parses all matches regardless of formatting, analyzes each fixture against its tier system and historical data, and learns from your local results.
+          <strong>Mode 1 - Predictions:</strong> Paste your betting data from OdiLeague with odds. The algorithm intelligently analyzes each fixture against its tier system and historical data.
+          <br><br>
+          <strong>Mode 2 - Bulk Results:</strong> Paste match results in format (Home / Away / HomeGoals / AwayGoals) for fast import. No odds needed.
         </p>
 
-        <textarea id="data-input" placeholder="Paste your betting data here. Example:
-
+        <textarea id="data-input" placeholder="MODE 1 - Predictions (with odds):
 Liverpool
 Everton
-
-1
 1.63
-
-X
 3.79
-
-2
 5.38
 
 Tottenham
 London Blues
-
-1
 3.14
-..."></textarea>
+...
+
+OR MODE 2 - Bulk Results (fast input):
+Brighton
+Leeds
+1
+1
+
+Sheffield U
+Southampton
+0
+0
+
+Tottenham
+Liverpool
+1
+4"></textarea>
 
         <div class="button-group">
           <button id="parse-btn" type="button">
-            <span>Parse & Analyze</span>
+            <span>Parse & Analyze (With Odds)</span>
+            <span>→</span>
+          </button>
+          <button id="bulk-btn" type="button" style="background: linear-gradient(135deg, #60a5fa 0%, #3b82f6 100%);">
+            <span>⚡ Import Bulk Results</span>
             <span>→</span>
           </button>
           <button class="secondary-btn" id="clear-btn" type="button">Clear Input</button>
         </div>
 
         <div class="data-controls">
-          <button class="control-btn" id="export-btn" type="button">Export JSON (Download)</button>
-          <button class="control-btn" id="copy-btn" type="button">Copy JSON</button>
-          <button class="control-btn" id="import-toggle-btn" type="button">Import JSON (Paste)</button>
-          <button class="control-btn" id="upload-btn" type="button">Upload JSON (File)</button>
-          <button class="control-btn clear-btn" id="clear-history-btn" type="button">Clear History</button>
+          <button class="control-btn" id="export-btn" type="button">📥 Export JSON (Download)</button>
+          <button class="control-btn" id="copy-btn" type="button">📋 Copy JSON</button>
+          <button class="control-btn" id="import-toggle-btn" type="button">📤 Import JSON (Paste)</button>
+          <button class="control-btn" id="upload-btn" type="button">📁 Upload JSON (File)</button>
+          <button class="control-btn clear-btn" id="clear-history-btn" type="button">🗑️ Clear History</button>
         </div>
 
         <input type="file" id="import-file-input" accept="application/json" style="display:none" />
 
         <div class="import-panel hidden" id="import-panel" aria-hidden="true">
-          <p style="color:#bfdbfe; font-size:0.95rem; margin-bottom:8px">Paste the exported JSON below and click "Paste & Import" to merge into local history.</p>
+          <p style="color:#bfdbfe; font-size:0.95rem; margin-bottom:8px">Paste the exported JSON below to merge into local history. Duplicates are automatically skipped.</p>
           <textarea id="import-textarea" placeholder='Paste exported JSON here'></textarea>
           <div style="display:flex; gap:8px; margin-top:10px;">
-            <button class="control-btn" id="paste-import-btn" type="button">Paste & Import</button>
+            <button class="control-btn" id="paste-import-btn" type="button">✓ Paste & Import</button>
             <button class="control-btn secondary-btn" id="import-cancel-btn" type="button">Cancel</button>
           </div>
         </div>
