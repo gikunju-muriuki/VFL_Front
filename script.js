@@ -1,473 +1,174 @@
 /**
- * Unified Hybrid VFL Predictive Engine
- * Combines Poisson xG modeling, Dynamic Elo, Fuzzy Odds Clusters, Python Risk/Trap Context, Kelly Criterion,
- * JSON Import/Export, and Bulk Results Processing.
+ * Core Prediction Brain
+ * Ingests historical match data to predict future outcomes using weighted analytics.
  */
-
-(function () {
-  'use strict';
-
-  // --- Mathematical Utilities ---
-
-  const MathEngine = {
-    factorial(n) {
-      if (n <= 1) return 1;
-      let res = 1;
-      for (let i = 2; i <= n; i++) res *= i;
-      return res;
-    },
-
-    poissonProb(k, lambda) {
-      return (Math.pow(lambda, k) * Math.exp(-lambda)) / this.factorial(k);
-    },
-
-    calculatexG(home, away, historicalMatches) {
-      let hScored = 0, hConceded = 0, hGames = 0;
-      let aScored = 0, aConceded = 0, aGames = 0;
-      let totalGoals = 0, totalGames = 0;
-
-      historicalMatches.forEach(m => {
-        const hG = Number(m.actualHomeGoals || 0);
-        const aG = Number(m.actualAwayGoals || 0);
-        totalGoals += (hG + aG);
-        totalGames += 1;
-
-        if (m.home === home) { hScored += hG; hConceded += aG; hGames++; }
-        if (m.away === away) { aScored += aG; aConceded += hG; aGames++; }
-      });
-
-      const avgLeagueGoalsPerGame = totalGames > 0 ? Math.max(1.0, totalGoals / (totalGames * 2)) : 1.35;
-
-      const homeAttack = hGames > 0 ? (hScored / hGames) / avgLeagueGoalsPerGame : 1.1;
-      const homeDefense = hGames > 0 ? (hConceded / hGames) / avgLeagueGoalsPerGame : 1.0;
-      const awayAttack = aGames > 0 ? (aScored / aGames) / avgLeagueGoalsPerGame : 0.9;
-      const awayDefense = aGames > 0 ? (aConceded / aGames) / avgLeagueGoalsPerGame : 1.1;
-
-      const lambdaHome = Math.max(0.2, Math.min(homeAttack * awayDefense * avgLeagueGoalsPerGame, 4.5));
-      const lambdaAway = Math.max(0.2, Math.min(awayAttack * homeDefense * avgLeagueGoalsPerGame, 4.5));
-
-      return { lambdaHome, lambdaAway };
-    },
-
-    generateScoreMatrix(lambdaHome, lambdaAway, maxGoals = 5) {
-      const matrix = [];
-      let probOver25 = 0;
-      let probUnder25 = 0;
-
-      for (let h = 0; h <= maxGoals; h++) {
-        matrix[h] = [];
-        const pH = this.poissonProb(h, lambdaHome);
-        for (let a = 0; a <= maxGoals; a++) {
-          const pA = this.poissonProb(a, lambdaAway);
-          const prob = pH * pA;
-          matrix[h][a] = prob;
-
-          if (h + a > 2.5) probOver25 += prob;
-          else probUnder25 += prob;
-        }
-      }
-
-      return { matrix, probOver25, probUnder25 };
-    },
-
-    calculateKelly(probability, decimalOdds, bankrollFraction = 0.25) {
-      const b = decimalOdds - 1;
-      const p = probability;
-      const q = 1 - p;
-
-      if (b <= 0 || p <= 0) return { rawKelly: 0, recommendedStakePct: 0 };
-
-      const fStar = (p * b - q) / b;
-      const recommendedStakePct = Math.max(0, fStar * bankrollFraction);
-
-      return {
-        rawKelly: (fStar * 100).toFixed(2),
-        recommendedStakePct: (recommendedStakePct * 100).toFixed(2)
-      };
-    }
-  };
-
-  // --- Python Trap & Context Rules ---
-
-  function evaluatePythonContext(home, away, hOdds, dOdds, aOdds, h2hRecords) {
-    let riskFlag = "NONE";
-    let confidenceOverride = null;
-    let forceDrawSignal = false;
-    let matchTemplates = [];
-
-    if (hOdds <= 1.45 || aOdds <= 1.45) {
-      const fav = hOdds <= 1.45 ? home : away;
-      riskFlag = `⚠️ Heavy-Favorite Trap Detected on ${fav} (${Math.min(hOdds, aOdds).toFixed(2)})! High 0-0/1-1 Risk.`;
-      forceDrawSignal = true;
-      matchTemplates = ["0-0_A", "1-1_C", "1-0_B"];
-    } else if (hOdds < dOdds && hOdds < aOdds) {
-      matchTemplates = ["2-0_A", "3-1_A", "2-1_B"];
-    } else if (aOdds < dOdds && aOdds < hOdds) {
-      matchTemplates = ["1-2_A", "1-3_B", "0-2_A"];
-    } else {
-      riskFlag = "DRAW MATRIX: Compressed Margin Under 2.5";
-      matchTemplates = ["1-1_A", "0-0_A"];
-    }
-
-    if (h2hRecords && h2hRecords.length >= 2) {
-      const total = h2hRecords.length;
-      let hWins = 0, aWins = 0, draws = 0;
-
-      h2hRecords.forEach(m => {
-        if (m.home === home) {
-          if (m.actualHomeGoals > m.actualAwayGoals) hWins++;
-          else if (m.actualAwayGoals > m.actualHomeGoals) aWins++;
-          else draws++;
-        } else {
-          if (m.actualAwayGoals > m.actualHomeGoals) hWins++;
-          else if (m.actualHomeGoals > m.actualAwayGoals) aWins++;
-          else draws++;
-        }
-      });
-
-      if (hWins / total >= 0.6) confidenceOverride = "VERY HIGH (Home H2H Dominance)";
-      else if (aWins / total >= 0.6) confidenceOverride = "VERY HIGH (Away H2H Dominance)";
-      else if (draws / total >= 0.5) confidenceOverride = "HIGH (H2H Draw Tendency)";
-    }
-
-    return { riskFlag, forceDrawSignal, confidenceOverride, matchTemplates };
+class PredictionEngine {
+  constructor(historicalData = []) {
+    // Initialize with historical data from data.json.txt
+    this.historicalData = historicalData;
+    this.teamStats = this._compileTeamStats();
+    
+    // Algorithm weights for final prediction confidence
+    this.weights = {
+      odds: 0.45,
+      historicalForm: 0.35,
+      tierDifference: 0.20
+    };
   }
 
-  // --- Flexible Text Parsers ---
+  /**
+   * Compiles historical goals and results for each team from data.json.txt
+   * @private
+   */
+  _compileTeamStats() {
+    const stats = {};
 
-  function parseGameweekClipboardData(rawText) {
-    const lines = rawText.split('\n').map(l => l.trim()).filter(Boolean);
-    const fixtures = [];
+    this.historicalData.forEach(match => {
+      // Initialize team objects if they don't exist
+      if (!stats[match.home]) stats[match.home] = { goalsScored: 0, goalsConceded: 0, matches: 0, points: 0 };
+      if (!stats[match.away]) stats[match.away] = { goalsScored: 0, goalsConceded: 0, matches: 0, points: 0 };
 
-    const oddsRegex = /(\d+\.\d{2})\s+(\d+\.\d{2})\s+(\d+\.\d{2})/;
-    const teamVersusRegex = /([A-Za-z0-9\s]+)\s+(?:vs|v|-)\s+([A-Za-z0-9\s]+)/i;
+      // Process Home Team[span_1](start_span)[span_1](end_span)
+      stats[match.home].goalsScored += match.actualHomeGoals || 0;
+      stats[match.home].goalsConceded += match.actualAwayGoals || 0;
+      stats[match.home].matches += 1;
 
-    let currentHome = null, currentAway = null;
+      // Process Away Team[span_2](start_span)[span_2](end_span)
+      stats[match.away].goalsScored += match.actualAwayGoals || 0;
+      stats[match.away].goalsConceded += match.actualHomeGoals || 0;
+      stats[match.away].matches += 1;
 
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-
-      const versusMatch = line.match(teamVersusRegex);
-      if (versusMatch) {
-        currentHome = versusMatch[1].trim();
-        currentAway = versusMatch[2].trim();
+      // Calculate historical points based on results[span_3](start_span)[span_3](end_span)
+      if (match.result === "1") {
+        stats[match.home].points += 3;
+      } else if (match.result === "2") {
+        stats[match.away].points += 3;
+      } else if (match.result === "X") {
+        stats[match.home].points += 1;
+        stats[match.away].points += 1;
       }
+    });
 
-      const oddsMatch = line.match(oddsRegex);
-      if (oddsMatch && currentHome && currentAway) {
-        fixtures.push({
-          home: currentHome,
-          away: currentAway,
-          hOdds: parseFloat(oddsMatch[1]),
-          dOdds: parseFloat(oddsMatch[2]),
-          aOdds: parseFloat(oddsMatch[3])
-        });
-        currentHome = null;
-        currentAway = null;
-      }
-    }
-
-    return fixtures;
+    return stats;
   }
 
-  // --- Main Predictive Pipeline ---
-
-  async function analyzeFixtureHybridML(fixture, idx) {
-    const { home, away, hOdds, dOdds, aOdds } = fixture;
-
-    const historicalMatches = await window.VFLHistory.readLocalMatches();
-    const homeElo = await window.VFLHistory.getTeamElo(home);
-    const awayElo = await window.VFLHistory.getTeamElo(away);
-
-    const rawH = 1 / hOdds, rawD = 1 / dOdds, rawA = 1 / aOdds;
-    const totalMargin = rawH + rawD + rawA;
-    const vigAnomaly = totalMargin > 1.11;
-
-    const fuzzyCluster = await window.VFLHistory.queryFuzzyHistoricalCluster(hOdds, dOdds, aOdds, 0.05);
-
-    const xG = MathEngine.calculatexG(home, away, historicalMatches);
-    const scoreMatrix = MathEngine.generateScoreMatrix(xG.lambdaHome, xG.lambdaAway);
-
-    const h2h = await window.VFLHistory.getHeadToHead(home, away);
-    const homeStreak = await window.VFLHistory.getTeamRecentForm(home);
-    const awayStreak = await window.VFLHistory.getTeamRecentForm(away);
-
-    const pythonContext = evaluatePythonContext(home, away, hOdds, dOdds, aOdds, h2h);
-
-    const eloDiff = homeElo - awayElo;
-    const eloProbHome = 1 / (1 + Math.pow(10, -eloDiff / 400));
-    const eloProbAway = 1 - eloProbHome;
-
-    let blendH = (rawH / totalMargin) * 0.20 + 
-                 (fuzzyCluster.pHome ?? rawH) * 0.35 + 
-                 eloProbHome * 0.20 + 
-                 (scoreMatrix.matrix[1][0] + scoreMatrix.matrix[2][0] + scoreMatrix.matrix[2][1]) * 0.25;
-
-    let blendD = (rawD / totalMargin) * 0.20 + 
-                 (fuzzyCluster.pDraw ?? rawD) * 0.35 + 
-                 (scoreMatrix.matrix[0][0] + scoreMatrix.matrix[1][1] + scoreMatrix.matrix[2][2]) * 0.45;
-
-    let blendA = (rawA / totalMargin) * 0.20 + 
-                 (fuzzyCluster.pAway ?? rawA) * 0.35 + 
-                 eloProbAway * 0.20 + 
-                 (scoreMatrix.matrix[0][1] + scoreMatrix.matrix[0][2] + scoreMatrix.matrix[1][2]) * 0.25;
-
-    if (homeStreak.consecutiveLosses >= 4) blendH += 0.08;
-    if (awayStreak.consecutiveLosses >= 4) blendA += 0.08;
-
-    const normSum = blendH + blendD + blendA;
-    blendH /= normSum; blendD /= normSum; blendA /= normSum;
-
-    let prediction = blendH > blendD && blendH > blendA ? '1' : blendA > blendD ? '2' : 'X';
-    if (pythonContext.forceDrawSignal && blendD >= 0.27) {
-      prediction = 'X';
+  /**
+   * Converts standard odds to implied probabilities (removing the bookmaker's overround).
+   * @private
+   */
+  _getImpliedProbabilities(homeOdds, drawOdds, awayOdds) {
+    if (!homeOdds || !drawOdds || !awayOdds || homeOdds === 0) {
+      return { home: 0.33, draw: 0.34, away: 0.33 }; // Fallback for zeroed odds matches[span_4](start_span)[span_4](end_span)
     }
 
-    const chosenProb = prediction === '1' ? blendH : prediction === 'X' ? blendD : blendA;
-    const chosenOdds = prediction === '1' ? hOdds : prediction === 'X' ? dOdds : aOdds;
-    const kelly = MathEngine.calculateKelly(chosenProb, chosenOdds, 0.25);
+    const impliedHome = 1 / homeOdds;
+    const impliedDraw = 1 / drawOdds;
+    const impliedAway = 1 / awayOdds;
+    const totalMargin = impliedHome + impliedDraw + impliedAway;
 
     return {
-      idx, home, away, hOdds, dOdds, aOdds,
-      homeElo, awayElo,
-      totalMarginPct: (totalMargin * 100).toFixed(1),
-      vigAnomaly,
-      hProb: (blendH * 100).toFixed(1),
-      dProb: (blendD * 100).toFixed(1),
-      aProb: (blendA * 100).toFixed(1),
-      prediction,
-      xGHome: xG.lambdaHome.toFixed(2),
-      xGAway: xG.lambdaAway.toFixed(2),
-      probOver25: (scoreMatrix.probOver25 * 100).toFixed(1),
-      probUnder25: (scoreMatrix.probUnder25 * 100).toFixed(1),
-      fuzzyMatches: fuzzyCluster.matchCount,
-      riskFlag: pythonContext.riskFlag,
-      templates: pythonContext.matchTemplates,
-      confidence: pythonContext.confidenceOverride || (chosenProb > 0.52 ? "HIGH CONVICTION" : "MEDIUM SIGNAL"),
-      kellyPct: kelly.recommendedStakePct
+      home: impliedHome / totalMargin,
+      draw: impliedDraw / totalMargin,
+      away: impliedAway / totalMargin
     };
   }
 
-  // --- Data Management (Import / Export) ---
+  /**
+   * Calculates a form index based on historical points per game.
+   * @private
+   */
+  _calculateFormIndex(homeTeam, awayTeam) {
+    const homeStats = this.teamStats[homeTeam];
+    const awayStats = this.teamStats[awayTeam];
 
-  async function exportHistoryJSON() {
-    try {
-      const data = await window.VFLHistory.readLocalMatches();
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `vfl_history_export_${new Date().toISOString().slice(0,10)}.json`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      alert("Error exporting data: " + err.message);
-    }
-  }
+    const homePPG = homeStats ? (homeStats.points / homeStats.matches) : 1.0;
+    const awayPPG = awayStats ? (awayStats.points / awayStats.matches) : 1.0;
+    
+    const totalPPG = homePPG + awayPPG;
+    if (totalPPG === 0) return { home: 0.5, away: 0.5 };
 
-  async function importHistoryJSON(event) {
-    const file = event.target.files[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-      try {
-        const data = JSON.parse(e.target.result);
-        if (!Array.isArray(data)) throw new Error("Invalid JSON format. Expected an array.");
-        
-        document.getElementById('predictionsContainer').innerHTML = '<div class="loading">Importing database... Please wait.</div>';
-        
-        for (const match of data) {
-          await window.VFLHistory.saveLocalMatch(match);
-        }
-        alert(`Successfully imported ${data.length} matches!`);
-        document.getElementById('predictionsContainer').innerHTML = '';
-      } catch (err) {
-        alert("Failed to parse JSON: " + err.message);
-      }
+    return {
+      home: homePPG / totalPPG,
+      away: awayPPG / totalPPG
     };
-    reader.readAsText(file);
   }
 
-  // --- Bulk Results Parser ---
+  /**
+   * Main predictive function to be called by the application.
+   * @param {Object} matchParams - The upcoming match parameters.
+   * @returns {Object} Prediction result including outcome ("1", "X", "2") and confidence.
+   */
+  predictMatch(matchParams) {
+    const { home, away, homeOdds, drawOdds, awayOdds, homeTier, awayTier } = matchParams;
 
-  async function processBulkResults() {
-    const rawResults = document.getElementById('rawResultsInput').value;
-    if (!rawResults.trim() || currentPredictions.length === 0) {
-      alert("Please load fixtures first, then paste results to match.");
-      return;
+    // 1. Odds Base Probabilities
+    const oddsProb = this._getImpliedProbabilities(homeOdds, drawOdds, awayOdds);
+
+    // 2. Historical Form Probabilities
+    const formProb = this._calculateFormIndex(home, away);
+
+    // 3. Tier Difference Adjustment
+    // Lower tier number means a stronger team (Tier 1 > Tier 2).
+    const tierDiff = (awayTier || 2) - (homeTier || 2); 
+    const tierHomeBoost = tierDiff > 0 ? 0.6 : (tierDiff < 0 ? 0.4 : 0.5);
+    const tierAwayBoost = 1 - tierHomeBoost;
+
+    // 4. Weighted Aggregation
+    const finalHomeProb = (oddsProb.home * this.weights.odds) + 
+                          (formProb.home * this.weights.historicalForm) + 
+                          (tierHomeBoost * this.weights.tierDifference);
+
+    const finalAwayProb = (oddsProb.away * this.weights.odds) + 
+                          (formProb.away * this.weights.historicalForm) + 
+                          (tierAwayBoost * this.weights.tierDifference);
+
+    const finalDrawProb = 1 - (finalHomeProb + finalAwayProb);
+
+    // 5. Determine Result
+    let predictedResult = "X";
+    let maxProb = finalDrawProb;
+
+    if (finalHomeProb > finalAwayProb && finalHomeProb > finalDrawProb) {
+      predictedResult = "1";
+      maxProb = finalHomeProb;
+    } else if (finalAwayProb > finalHomeProb && finalAwayProb > finalDrawProb) {
+      predictedResult = "2";
+      maxProb = finalAwayProb;
     }
 
-    const lines = rawResults.split('\n').map(l => l.trim()).filter(Boolean);
-    const resultRegex = /([A-Za-z0-9\s]+)\s+(\d+)\s*[-:]\s*(\d+)\s+([A-Za-z0-9\s]+)/i;
-    let savedCount = 0;
-
-    for (const line of lines) {
-      const match = line.match(resultRegex);
-      if (match) {
-        const parsedHome = match[1].trim();
-        const hGoals = parseInt(match[2], 10);
-        const aGoals = parseInt(match[3], 10);
-        const parsedAway = match[4].trim();
-
-        const activeFixture = currentPredictions.find(p => 
-          p.home.toLowerCase() === parsedHome.toLowerCase() && 
-          p.away.toLowerCase() === parsedAway.toLowerCase()
-        );
-
-        if (activeFixture) {
-          await window.VFLHistory.saveLocalMatch({
-            home: activeFixture.home,
-            away: activeFixture.away,
-            hOdds: activeFixture.hOdds,
-            dOdds: activeFixture.dOdds,
-            aOdds: activeFixture.aOdds,
-            actualHomeGoals: hGoals,
-            actualAwayGoals: aGoals
-          });
-          
-          const hInput = document.getElementById(`hGoals_${activeFixture.idx}`);
-          const aInput = document.getElementById(`aGoals_${activeFixture.idx}`);
-          if (hInput && aInput) {
-            hInput.value = hGoals;
-            aInput.value = aGoals;
-            hInput.disabled = true;
-            aInput.disabled = true;
-          }
-          savedCount++;
-        }
-      }
-    }
-    alert(`Successfully saved ${savedCount} match results.`);
+    return {
+      matchup: `${home} vs ${away}`,
+      prediction: predictedResult,
+      probabilities: {
+        home: (finalHomeProb * 100).toFixed(2) + "%",
+        draw: (finalDrawProb * 100).toFixed(2) + "%",
+        away: (finalAwayProb * 100).toFixed(2) + "%"
+      },
+      confidence: (maxProb * 100).toFixed(2) + "%"
+    };
   }
+}
 
-  // --- UI Rendering ---
-
-  function renderMatchCard(m) {
-    const badgeText = m.prediction === '1' ? 'HOME WIN (1)' : m.prediction === 'X' ? 'DRAW (X)' : 'AWAY WIN (2)';
-    const badgeClass = m.prediction === '1' ? 'home-win' : m.prediction === 'X' ? 'draw-win' : 'away-win';
-
-    return `
-      <div class="match-card" data-idx="${m.idx}">
-        <div class="match-header">
-          <div class="match-title">
-            <strong>${m.home}</strong> <small>(${m.homeElo})</small> vs <strong>${m.away}</strong> <small>(${m.awayElo})</small>
-          </div>
-          <span class="badge ${badgeClass}">${badgeText}</span>
-        </div>
-
-        ${m.vigAnomaly ? `<div class="alert alert-danger">⚠️ High Bookie Margin Detected (${m.totalMarginPct}% Vig)</div>` : ''}
-        ${m.riskFlag !== "NONE" ? `<div class="alert alert-warning">${m.riskFlag}</div>` : ''}
-
-        <div class="odds-grid">
-          <div class="odds-box ${m.prediction === '1' ? 'highlight' : ''}">
-            <span class="label">1 (${m.hOdds.toFixed(2)})</span>
-            <span class="value">${m.hProb}%</span>
-          </div>
-          <div class="odds-box ${m.prediction === 'X' ? 'highlight' : ''}">
-            <span class="label">X (${m.dOdds.toFixed(2)})</span>
-            <span class="value">${m.dProb}%</span>
-          </div>
-          <div class="odds-box ${m.prediction === '2' ? 'highlight' : ''}">
-            <span class="label">2 (${m.aOdds.toFixed(2)})</span>
-            <span class="value">${m.aProb}%</span>
-          </div>
-        </div>
-
-        <div class="stats-panel">
-          <div><strong>xG:</strong> ${m.xGHome} - ${m.xGAway}</div>
-          <div><strong>O/U 2.5:</strong> Over ${m.probOver25}% | Under ${m.probUnder25}%</div>
-          <div><strong>Fuzzy Matches:</strong> ${m.fuzzyMatches}</div>
-          <div><strong>Confidence:</strong> ${m.confidence}</div>
-          <div><strong>Kelly Stake:</strong> <span class="kelly-value">${m.kellyPct}% Bankroll</span></div>
-          <div><strong>Templates:</strong> ${m.templates.join(', ')}</div>
-        </div>
-
-        <div class="result-input-row">
-          <input type="number" id="hGoals_${m.idx}" placeholder="Home Goals" min="0" max="15">
-          <input type="number" id="aGoals_${m.idx}" placeholder="Away Goals" min="0" max="15">
-          <button class="btn btn-save" onclick="window.saveMatchResult(${m.idx})">Save Result</button>
-        </div>
-      </div>
-    `;
-  }
-
-  // --- App State & Handlers ---
-
-  let currentPredictions = [];
-
-  async function processGameweek() {
-    const rawInput = document.getElementById('rawClipboardInput').value;
-    if (!rawInput.trim()) {
-      alert("Please paste gameweek fixtures and odds.");
-      return;
-    }
-
-    const fixtures = parseGameweekClipboardData(rawInput);
-    if (fixtures.length === 0) {
-      alert("No valid fixtures or odds found. Check your text format.");
-      return;
-    }
-
-    const container = document.getElementById('predictionsContainer');
-    container.innerHTML = '<div class="loading">Running ML Models & Processing History...</div>';
-
-    currentPredictions = [];
-    let html = '';
-
-    for (let i = 0; i < fixtures.length; i++) {
-      const result = await analyzeFixtureHybridML(fixtures[i], i);
-      currentPredictions.push(result);
-      html += renderMatchCard(result);
-    }
-
-    container.innerHTML = html;
-  }
-
-  window.saveMatchResult = async function (idx) {
-    const pred = currentPredictions[idx];
-    if (!pred) return;
-
-    const hGInput = document.getElementById(`hGoals_${idx}`);
-    const aGInput = document.getElementById(`aGoals_${idx}`);
-
-    if (hGInput.value === '' || aGInput.value === '') {
-      alert("Enter valid score values.");
-      return;
-    }
-
-    const actualHomeGoals = parseInt(hGInput.value, 10);
-    const actualAwayGoals = parseInt(aGInput.value, 10);
-
-    await window.VFLHistory.saveLocalMatch({
-      home: pred.home,
-      away: pred.away,
-      hOdds: pred.hOdds,
-      dOdds: pred.dOdds,
-      aOdds: pred.aOdds,
-      actualHomeGoals,
-      actualAwayGoals
-    });
-
-    alert(`Result for ${pred.home} vs ${pred.away} saved!`);
-    hGInput.disabled = true;
-    aGInput.disabled = true;
+// Example Integration for UI/Backend Controller
+/*
+  import historicalData from './data.json.txt';
+  
+  // Initialize the brain
+  const predictor = new PredictionEngine(historicalData);
+  
+  // Predict a new match
+  const upcomingMatch = {
+    home: "London Blues",
+    away: "Manchester Blue",
+    homeOdds: 2.50,
+    drawOdds: 3.20,
+    awayOdds: 2.80,
+    homeTier: 1,
+    awayTier: 1
   };
-
-  document.addEventListener('DOMContentLoaded', () => {
-    document.getElementById('btnParseGameweek')?.addEventListener('click', processGameweek);
-    document.getElementById('btnParseResults')?.addEventListener('click', processBulkResults);
-    document.getElementById('btnExportJSON')?.addEventListener('click', exportHistoryJSON);
-    document.getElementById('fileImportJSON')?.addEventListener('change', importHistoryJSON);
-
-    document.getElementById('btnClearHistory')?.addEventListener('click', async () => {
-      if (confirm("Are you sure you want to clear all stored match history and Elo ratings?")) {
-        await window.VFLHistory.clearAllHistory();
-        alert("Match history reset successfully.");
-      }
-    });
-  });
-
-})();
+  
+  const result = predictor.predictMatch(upcomingMatch);
+  
+  // Inject `result.prediction` and `result.confidence` into existing UI state without changing DOM structure.
+*/
+export default PredictionEngine;
