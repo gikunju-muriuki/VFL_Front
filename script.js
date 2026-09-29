@@ -1,6 +1,7 @@
 /**
  * Unified Hybrid VFL Predictive Engine
- * Combines Poisson xG modeling, Dynamic Elo, Fuzzy Odds Clusters, Python Risk/Trap Context, and Kelly Criterion.
+ * Combines Poisson xG modeling, Dynamic Elo, Fuzzy Odds Clusters, Python Risk/Trap Context, Kelly Criterion,
+ * JSON Import/Export, and Bulk Results Processing.
  */
 
 (function () {
@@ -86,7 +87,7 @@
     }
   };
 
-  // --- Python Trap & H2H Context Logic ---
+  // --- Python Trap & Context Rules ---
 
   function evaluatePythonContext(home, away, hOdds, dOdds, aOdds, h2hRecords) {
     let riskFlag = "NONE";
@@ -94,7 +95,6 @@
     let forceDrawSignal = false;
     let matchTemplates = [];
 
-    // Favorite trap detection
     if (hOdds <= 1.45 || aOdds <= 1.45) {
       const fav = hOdds <= 1.45 ? home : away;
       riskFlag = `⚠️ Heavy-Favorite Trap Detected on ${fav} (${Math.min(hOdds, aOdds).toFixed(2)})! High 0-0/1-1 Risk.`;
@@ -109,19 +109,18 @@
       matchTemplates = ["1-1_A", "0-0_A"];
     }
 
-    // Head-to-Head analysis
     if (h2hRecords && h2hRecords.length >= 2) {
       const total = h2hRecords.length;
       let hWins = 0, aWins = 0, draws = 0;
 
       h2hRecords.forEach(m => {
         if (m.home === home) {
-          if (m.hGoals > m.aGoals) hWins++;
-          else if (m.aGoals > m.hGoals) aWins++;
+          if (m.actualHomeGoals > m.actualAwayGoals) hWins++;
+          else if (m.actualAwayGoals > m.actualHomeGoals) aWins++;
           else draws++;
         } else {
-          if (m.aGoals > m.hGoals) hWins++;
-          else if (m.hGoals > m.aGoals) aWins++;
+          if (m.actualAwayGoals > m.actualHomeGoals) hWins++;
+          else if (m.actualHomeGoals > m.actualAwayGoals) aWins++;
           else draws++;
         }
       });
@@ -134,13 +133,12 @@
     return { riskFlag, forceDrawSignal, confidenceOverride, matchTemplates };
   }
 
-  // --- Robust Text Parser ---
+  // --- Flexible Text Parsers ---
 
   function parseGameweekClipboardData(rawText) {
     const lines = rawText.split('\n').map(l => l.trim()).filter(Boolean);
     const fixtures = [];
 
-    // Pattern matching: "Home vs Away" or "Home - Away" followed by odds
     const oddsRegex = /(\d+\.\d{2})\s+(\d+\.\d{2})\s+(\d+\.\d{2})/;
     const teamVersusRegex = /([A-Za-z0-9\s]+)\s+(?:vs|v|-)\s+([A-Za-z0-9\s]+)/i;
 
@@ -177,32 +175,25 @@
   async function analyzeFixtureHybridML(fixture, idx) {
     const { home, away, hOdds, dOdds, aOdds } = fixture;
 
-    // 1. Fetch persistent history & Elo
     const historicalMatches = await window.VFLHistory.readLocalMatches();
     const homeElo = await window.VFLHistory.getTeamElo(home);
     const awayElo = await window.VFLHistory.getTeamElo(away);
 
-    // 2. Implied Probabilities & Vig Margin
     const rawH = 1 / hOdds, rawD = 1 / dOdds, rawA = 1 / aOdds;
     const totalMargin = rawH + rawD + rawA;
-    const vigAnomaly = totalMargin > 1.11; // Flag bookmaker margin spike (>111%)
+    const vigAnomaly = totalMargin > 1.11;
 
-    // 3. Fuzzy Historical Odds Lookup
     const fuzzyCluster = await window.VFLHistory.queryFuzzyHistoricalCluster(hOdds, dOdds, aOdds, 0.05);
 
-    // 4. Poisson Distribution xG Model
     const xG = MathEngine.calculatexG(home, away, historicalMatches);
     const scoreMatrix = MathEngine.generateScoreMatrix(xG.lambdaHome, xG.lambdaAway);
 
-    // 5. Head-to-Head & PRNG Streaks
     const h2h = await window.VFLHistory.getHeadToHead(home, away);
     const homeStreak = await window.VFLHistory.getTeamRecentForm(home);
     const awayStreak = await window.VFLHistory.getTeamRecentForm(away);
 
-    // 6. Python Context & Trap Detection
     const pythonContext = evaluatePythonContext(home, away, hOdds, dOdds, aOdds, h2h);
 
-    // 7. Dynamic Weights & Blend Calculation
     const eloDiff = homeElo - awayElo;
     const eloProbHome = 1 / (1 + Math.pow(10, -eloDiff / 400));
     const eloProbAway = 1 - eloProbHome;
@@ -221,20 +212,17 @@
                  eloProbAway * 0.20 + 
                  (scoreMatrix.matrix[0][1] + scoreMatrix.matrix[0][2] + scoreMatrix.matrix[1][2]) * 0.25;
 
-    // PRNG Mean Reversion adjustment
     if (homeStreak.consecutiveLosses >= 4) blendH += 0.08;
     if (awayStreak.consecutiveLosses >= 4) blendA += 0.08;
 
     const normSum = blendH + blendD + blendA;
     blendH /= normSum; blendD /= normSum; blendA /= normSum;
 
-    // Prediction selection
     let prediction = blendH > blendD && blendH > blendA ? '1' : blendA > blendD ? '2' : 'X';
     if (pythonContext.forceDrawSignal && blendD >= 0.27) {
       prediction = 'X';
     }
 
-    // Kelly Bet Sizing
     const chosenProb = prediction === '1' ? blendH : prediction === 'X' ? blendD : blendA;
     const chosenOdds = prediction === '1' ? hOdds : prediction === 'X' ? dOdds : aOdds;
     const kelly = MathEngine.calculateKelly(chosenProb, chosenOdds, 0.25);
@@ -260,7 +248,102 @@
     };
   }
 
-  // --- UI Rendering Engine ---
+  // --- Data Management (Import / Export) ---
+
+  async function exportHistoryJSON() {
+    try {
+      const data = await window.VFLHistory.readLocalMatches();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `vfl_history_export_${new Date().toISOString().slice(0,10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      alert("Error exporting data: " + err.message);
+    }
+  }
+
+  async function importHistoryJSON(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      try {
+        const data = JSON.parse(e.target.result);
+        if (!Array.isArray(data)) throw new Error("Invalid JSON format. Expected an array.");
+        
+        document.getElementById('predictionsContainer').innerHTML = '<div class="loading">Importing database... Please wait.</div>';
+        
+        for (const match of data) {
+          await window.VFLHistory.saveLocalMatch(match);
+        }
+        alert(`Successfully imported ${data.length} matches!`);
+        document.getElementById('predictionsContainer').innerHTML = '';
+      } catch (err) {
+        alert("Failed to parse JSON: " + err.message);
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  // --- Bulk Results Parser ---
+
+  async function processBulkResults() {
+    const rawResults = document.getElementById('rawResultsInput').value;
+    if (!rawResults.trim() || currentPredictions.length === 0) {
+      alert("Please load fixtures first, then paste results to match.");
+      return;
+    }
+
+    const lines = rawResults.split('\n').map(l => l.trim()).filter(Boolean);
+    const resultRegex = /([A-Za-z0-9\s]+)\s+(\d+)\s*[-:]\s*(\d+)\s+([A-Za-z0-9\s]+)/i;
+    let savedCount = 0;
+
+    for (const line of lines) {
+      const match = line.match(resultRegex);
+      if (match) {
+        const parsedHome = match[1].trim();
+        const hGoals = parseInt(match[2], 10);
+        const aGoals = parseInt(match[3], 10);
+        const parsedAway = match[4].trim();
+
+        const activeFixture = currentPredictions.find(p => 
+          p.home.toLowerCase() === parsedHome.toLowerCase() && 
+          p.away.toLowerCase() === parsedAway.toLowerCase()
+        );
+
+        if (activeFixture) {
+          await window.VFLHistory.saveLocalMatch({
+            home: activeFixture.home,
+            away: activeFixture.away,
+            hOdds: activeFixture.hOdds,
+            dOdds: activeFixture.dOdds,
+            aOdds: activeFixture.aOdds,
+            actualHomeGoals: hGoals,
+            actualAwayGoals: aGoals
+          });
+          
+          const hInput = document.getElementById(`hGoals_${activeFixture.idx}`);
+          const aInput = document.getElementById(`aGoals_${activeFixture.idx}`);
+          if (hInput && aInput) {
+            hInput.value = hGoals;
+            aInput.value = aGoals;
+            hInput.disabled = true;
+            aInput.disabled = true;
+          }
+          savedCount++;
+        }
+      }
+    }
+    alert(`Successfully saved ${savedCount} match results.`);
+  }
+
+  // --- UI Rendering ---
 
   function renderMatchCard(m) {
     const badgeText = m.prediction === '1' ? 'HOME WIN (1)' : m.prediction === 'X' ? 'DRAW (X)' : 'AWAY WIN (2)';
@@ -296,7 +379,7 @@
         <div class="stats-panel">
           <div><strong>xG:</strong> ${m.xGHome} - ${m.xGAway}</div>
           <div><strong>O/U 2.5:</strong> Over ${m.probOver25}% | Under ${m.probUnder25}%</div>
-          <div><strong>Fuzzy Cluster Matches:</strong> ${m.fuzzyMatches}</div>
+          <div><strong>Fuzzy Matches:</strong> ${m.fuzzyMatches}</div>
           <div><strong>Confidence:</strong> ${m.confidence}</div>
           <div><strong>Kelly Stake:</strong> <span class="kelly-value">${m.kellyPct}% Bankroll</span></div>
           <div><strong>Templates:</strong> ${m.templates.join(', ')}</div>
@@ -311,25 +394,25 @@
     `;
   }
 
-  // --- App State & DOM Binding ---
+  // --- App State & Handlers ---
 
   let currentPredictions = [];
 
   async function processGameweek() {
     const rawInput = document.getElementById('rawClipboardInput').value;
     if (!rawInput.trim()) {
-      alert("Please paste gameweek data standard text.");
+      alert("Please paste gameweek fixtures and odds.");
       return;
     }
 
     const fixtures = parseGameweekClipboardData(rawInput);
     if (fixtures.length === 0) {
-      alert("No valid fixtures or odds found in parsed text. Check input format.");
+      alert("No valid fixtures or odds found. Check your text format.");
       return;
     }
 
     const container = document.getElementById('predictionsContainer');
-    container.innerHTML = '<div class="loading">Running Hybrid ML Models & Processing History...</div>';
+    container.innerHTML = '<div class="loading">Running ML Models & Processing History...</div>';
 
     currentPredictions = [];
     let html = '';
@@ -368,24 +451,23 @@
       actualAwayGoals
     });
 
-    alert(`Result for ${pred.home} vs ${pred.away} saved and Elo ratings updated!`);
+    alert(`Result for ${pred.home} vs ${pred.away} saved!`);
     hGInput.disabled = true;
     aGInput.disabled = true;
   };
 
   document.addEventListener('DOMContentLoaded', () => {
-    const parseBtn = document.getElementById('btnParseGameweek');
-    if (parseBtn) parseBtn.addEventListener('click', processGameweek);
+    document.getElementById('btnParseGameweek')?.addEventListener('click', processGameweek);
+    document.getElementById('btnParseResults')?.addEventListener('click', processBulkResults);
+    document.getElementById('btnExportJSON')?.addEventListener('click', exportHistoryJSON);
+    document.getElementById('fileImportJSON')?.addEventListener('change', importHistoryJSON);
 
-    const clearBtn = document.getElementById('btnClearHistory');
-    if (clearBtn) {
-      clearBtn.addEventListener('click', async () => {
-        if (confirm("Are you sure you want to clear all stored match history and Elo ratings?")) {
-          await window.VFLHistory.clearAllHistory();
-          alert("Match history reset successfully.");
-        }
-      });
-    }
+    document.getElementById('btnClearHistory')?.addEventListener('click', async () => {
+      if (confirm("Are you sure you want to clear all stored match history and Elo ratings?")) {
+        await window.VFLHistory.clearAllHistory();
+        alert("Match history reset successfully.");
+      }
+    });
   });
 
 })();
