@@ -201,6 +201,7 @@
 
   /**
    * HYBRID SELF-LEARNING PREDICTIVE ENGINE (analyzeFixtureML)
+   * Enhanced with Global Entropy Suppression, Rolling PRNG Correction, and Value Overlays.
    */
   async function analyzeFixtureML(home, away, hOdds, dOdds, aOdds, idx) {
     const historicalData = await getAllMatches();
@@ -307,6 +308,36 @@
         else probUnder25 += p;
       }
     }
+
+    // =========================================================================
+    // ENHANCEMENT: HIGH-ORDER PRNG STATE TRANSITION HOOKS
+    // =========================================================================
+    const leagueMatches = [...historicalData].sort((a, b) => new Date(a.timestamp || 0) - new Date(b.timestamp || 0));
+    const totalHistoryCount = leagueMatches.length;
+
+    let recentLeagueGoalsSum = 0;
+    const SLIDING_WINDOW_SIZE = 10;
+    const recentWindowMatches = leagueMatches.slice(-SLIDING_WINDOW_SIZE);
+
+    recentWindowMatches.forEach(m => {
+      recentLeagueGoalsSum += (Number(m.actualHomeGoals ?? 0) + Number(m.actualAwayGoals ?? 0));
+    });
+
+    const recentLeagueGPG = recentWindowMatches.length > 0 ? (recentLeagueGoalsSum / recentWindowMatches.length) : 2.5;
+    const baseHistoricalGPG = totalHistoryCount > 0 
+      ? (leagueMatches.reduce((acc, m) => acc + Number(m.actualHomeGoals ?? 0) + Number(m.actualAwayGoals ?? 0), 0) / totalHistoryCount) 
+      : 2.5;
+
+    const globalEntropySuppression = recentLeagueGPG - baseHistoricalGPG;
+
+    if (globalEntropySuppression > 0.45) {
+      probOver25 *= Math.max(0.70, 1.0 - (globalEntropySuppression * 0.5));
+      probUnder25 = 1.0 - probOver25;
+    } else if (globalEntropySuppression < -0.45) {
+      probOver25 = Math.min(0.95, probOver25 * (1.0 + Math.abs(globalEntropySuppression)));
+      probUnder25 = 1.0 - probOver25;
+    }
+
     scoreMatrix.sort((a, b) => b.prob - a.prob);
     const topScores = scoreMatrix.slice(0, 3).map(s => `${s.score} (${(s.prob * 100).toFixed(1)}%)`);
 
@@ -314,6 +345,10 @@
     let weightH = (rawHProb * 0.25) + (dynamicHomeRank * 0.30) + (binnedHomeRank * 0.25) + (eloDiff > 0 ? 0.05 : 0) + meanReversionShiftH;
     let weightX = (rawDProb * 0.25) + (dynamicDrawRank * 0.30) + (binnedDrawRank * 0.25);
     let weightA = (rawAProb * 0.25) + (dynamicAwayRank * 0.30) + (binnedAwayRank * 0.25) + (eloDiff < 0 ? 0.05 : 0) + meanReversionShiftA;
+
+    if (marginAnomaly && hOdds > 2.20 && aOdds > 2.20) {
+      weightX += 0.085; 
+    }
 
     const sumW = weightH + weightX + weightA;
     let finalHProb = weightH / sumW;
@@ -330,7 +365,7 @@
       const favorite = hOdds <= 1.45 ? home : away;
       trapNotice = `CRITICAL TRAP DETECTED: Heavy favorite market on ${favorite}. Upset / 0-0 / 1-1 highly probable.`;
       templates = ["0-0_A", "1-1_C", "1-0_B"];
-      finalDProb += 0.10; // Boost draw probability under trap conditions
+      finalDProb += 0.10; 
       const newSum = finalHProb + finalDProb + finalAProb;
       finalHProb /= newSum;
       finalDProb /= newSum;
@@ -410,6 +445,8 @@
       trapNotice, marginAnomaly
     };
   }
+
+
 
   // =========================================================================
   // EXPORT/IMPORT & NOTIFICATION SYSTEM
