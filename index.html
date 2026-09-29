@@ -1,802 +1,767 @@
+Here are the complete, production-ready code files for the unified hybrid architecture.
+This implementation eliminates IndexedDB duplication, unifies data access under window.VFLHistory, incorporates Python trap detection and H2H logic, applies Poisson xG score modeling, enables fuzzy odds matching with time-decay, and computes fractional Kelly bet sizing.
+File 1: dynamic-history.js
+/**
+ * Dynamic History Engine & Persistent IndexedDB Bridge
+ * Handles unified database storage, Elo calculation, fuzzy cluster querying, and time-decay weighting.
+ */
+
+(function () {
+  'use strict';
+
+  const DB_NAME = 'VFL_Unified_DB';
+  const DB_VERSION = 1;
+  const STORE_MATCHES = 'matches';
+  const STORE_RATINGS = 'team_ratings';
+
+  const ELO_DEFAULT = 1500;
+  const ELO_K_FACTOR = 32;
+  const HALF_LIFE_DAYS = 30;
+
+  let dbPromise = null;
+
+  /**
+   * Initialize or upgrade IndexedDB
+   */
+  function getDB() {
+    if (!dbPromise) {
+      dbPromise = new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+        request.onupgradeneeded = (event) => {
+          const db = event.target.result;
+          if (!db.objectStoreNames.contains(STORE_MATCHES)) {
+            const matchStore = db.createObjectStore(STORE_MATCHES, { keyPath: 'id' });
+            matchStore.createIndex('timestamp', 'timestamp', { unique: false });
+            matchStore.createIndex('home', 'home', { unique: false });
+            matchStore.createIndex('away', 'away', { unique: false });
+            matchStore.createIndex('oddsCombo', 'oddsCombo', { unique: false });
+          }
+          if (!db.objectStoreNames.contains(STORE_RATINGS)) {
+            db.createObjectStore(STORE_RATINGS, { keyPath: 'team' });
+          }
+        };
+
+        request.onsuccess = (event) => resolve(event.target.result);
+        request.onerror = (event) => reject(event.target.error);
+      });
+    }
+    return dbPromise;
+  }
+
+  /**
+   * Helper: Generate a unique, deterministic hash key for deduplication
+   */
+  function generateMatchKey(match) {
+    const dateStr = match.date || new Date(match.timestamp || Date.now()).toISOString().slice(0, 10);
+    return `${dateStr}_${match.home}_vs_${match.away}_${match.hOdds}_${match.dOdds}_${match.aOdds}`.toLowerCase();
+  }
+
+  /**
+   * Exponential Time Decay Weight
+   * w(t) = e^(-lambda * t_days) where lambda = ln(2) / 30
+   */
+  function calculateTimeDecayWeight(matchTimestamp) {
+    if (!matchTimestamp) return 1.0;
+    const matchDate = new Date(matchTimestamp);
+    const now = new Date();
+    const elapsedDays = Math.max(0, (now - matchDate) / (1000 * 60 * 60 * 24));
+    const lambda = Math.LN2 / HALF_LIFE_DAYS;
+    return Math.exp(-lambda * elapsedDays);
+  }
+
+  /**
+   * Elo Rating Calculations
+   */
+  function calculateExpectedScore(ratingA, ratingB) {
+    return 1 / (1 + Math.pow(10, (ratingB - ratingA) / 400));
+  }
+
+  function updateEloRatings(homeRating, awayRating, hGoals, aGoals) {
+    const expectedHome = calculateExpectedScore(homeRating, awayRating);
+    const expectedAway = calculateExpectedScore(awayRating, homeRating);
+
+    let actualHome = 0.5, actualAway = 0.5;
+    if (hGoals > aGoals) { actualHome = 1.0; actualAway = 0.0; }
+    else if (aGoals > hGoals) { actualHome = 0.0; actualAway = 1.0; }
+
+    const goalDiff = Math.abs(hGoals - aGoals);
+    const marginMult = Math.log2(Math.max(goalDiff, 1) + 1);
+
+    const newHome = homeRating + ELO_K_FACTOR * marginMult * (actualHome - expectedHome);
+    const newAway = awayRating + ELO_K_FACTOR * marginMult * (actualAway - expectedAway);
+
+    return {
+      newHomeRating: Math.round(newHome),
+      newAwayRating: Math.round(newAway)
+    };
+  }
+
+  const VFLHistory = {
+    /**
+     * Fetch all historical matches from IndexedDB
+     */
+    async readLocalMatches() {
+      const db = await getDB();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_MATCHES, 'readonly');
+        const store = tx.objectStore(STORE_MATCHES);
+        const request = store.getAll();
+        request.onsuccess = () => resolve(request.result || []);
+        request.onerror = () => reject(request.error);
+      });
+    },
+
+    /**
+     * Save or update a match record and update team Elo ratings
+     */
+    async saveLocalMatch(matchData) {
+      const db = await getDB();
+      const matchId = matchData.id || generateMatchKey(matchData);
+      
+      const record = {
+        id: matchId,
+        timestamp: matchData.timestamp || Date.now(),
+        saved_at: new Date().toISOString(),
+        home: matchData.home,
+        away: matchData.away,
+        hOdds: Number(matchData.hOdds || matchData.homeOdds),
+        dOdds: Number(matchData.dOdds || matchData.drawOdds),
+        aOdds: Number(matchData.aOdds || matchData.awayOdds),
+        actualHomeGoals: Number(matchData.actualHomeGoals ?? matchData.homeGoals ?? 0),
+        actualAwayGoals: Number(matchData.actualAwayGoals ?? matchData.awayGoals ?? 0),
+        result: matchData.result || (
+          Number(matchData.actualHomeGoals) > Number(matchData.actualAwayGoals) ? '1' :
+          Number(matchData.actualAwayGoals) > Number(matchData.actualHomeGoals) ? '2' : 'X'
+        ),
+        totalGoals: Number(matchData.actualHomeGoals || 0) + Number(matchData.actualAwayGoals || 0),
+        oddsCombo: `${Number(matchData.hOdds).toFixed(2)}-${Number(matchData.dOdds).toFixed(2)}-${Number(matchData.aOdds).toFixed(2)}`
+      };
+
+      // Save match record
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_MATCHES, 'readwrite');
+        const store = tx.objectStore(STORE_MATCHES);
+        const req = store.put(record);
+        req.onsuccess = () => resolve();
+        req.onerror = () => reject(req.error);
+      });
+
+      // Update team Elo ratings
+      await this.recalculateEloForTeams(record.home, record.away, record.actualHomeGoals, record.actualAwayGoals);
+
+      return record;
+    },
+
+    /**
+     * Recalculate and persist Elo ratings for given teams
+     */
+    async recalculateEloForTeams(homeTeam, awayTeam, hGoals, aGoals) {
+      const db = await getDB();
+      const tx = db.transaction(STORE_RATINGS, 'readwrite');
+      const store = tx.objectStore(STORE_RATINGS);
+
+      const getRating = (team) => new Promise((resolve) => {
+        const req = store.get(team);
+        req.onsuccess = () => resolve(req.result ? req.result.rating : ELO_DEFAULT);
+      });
+
+      const homeElo = await getRating(homeTeam);
+      const awayElo = await getRating(awayTeam);
+
+      const updated = updateEloRatings(homeElo, awayElo, hGoals, aGoals);
+
+      store.put({ team: homeTeam, rating: updated.newHomeRating, updated_at: Date.now() });
+      store.put({ team: awayTeam, rating: updated.newAwayRating, updated_at: Date.now() });
+    },
+
+    /**
+     * Retrieve Elo rating for a specific team
+     */
+    async getTeamElo(team) {
+      const db = await getDB();
+      return new Promise((resolve) => {
+        const tx = db.transaction(STORE_RATINGS, 'readonly');
+        const store = tx.objectStore(STORE_RATINGS);
+        const req = store.get(team);
+        req.onsuccess = () => resolve(req.result ? req.result.rating : ELO_DEFAULT);
+        req.onerror = () => resolve(ELO_DEFAULT);
+      });
+    },
+
+    /**
+     * Query historical data using Fuzzy Binning (+/- tolerance) & Time-Decay
+     */
+    async queryFuzzyHistoricalCluster(hOdds, dOdds, aOdds, tolerance = 0.05) {
+      const matches = await this.readLocalMatches();
+
+      let weightedHomeWins = 0;
+      let weightedDraws = 0;
+      let weightedAwayWins = 0;
+      let totalWeight = 0;
+      let matchCount = 0;
+
+      matches.forEach(m => {
+        const hMatch = Math.abs(m.hOdds - hOdds) <= tolerance;
+        const dMatch = Math.abs(m.dOdds - dOdds) <= tolerance;
+        const aMatch = Math.abs(m.aOdds - aOdds) <= tolerance;
+
+        if (hMatch && dMatch && aMatch) {
+          const weight = calculateTimeDecayWeight(m.timestamp || m.saved_at);
+          matchCount++;
+          totalWeight += weight;
+
+          if (m.result === '1') weightedHomeWins += weight;
+          else if (m.result === 'X') weightedDraws += weight;
+          else if (m.result === '2') weightedAwayWins += weight;
+        }
+      });
+
+      return {
+        matchCount,
+        totalWeight,
+        pHome: totalWeight > 0 ? weightedHomeWins / totalWeight : null,
+        pDraw: totalWeight > 0 ? weightedDraws / totalWeight : null,
+        pAway: totalWeight > 0 ? weightedAwayWins / totalWeight : null
+      };
+    },
+
+    /**
+     * Retrieve head-to-head records between two teams
+     */
+    async getHeadToHead(teamA, teamB) {
+      const matches = await this.readLocalMatches();
+      return matches.filter(m => 
+        (m.home === teamA && m.away === teamB) || (m.home === teamB && m.away === teamA)
+      ).map(m => ({
+        home: m.home,
+        away: m.away,
+        hGoals: Number(m.actualHomeGoals),
+        aGoals: Number(m.actualAwayGoals),
+        result: m.result
+      }));
+    },
+
+    /**
+     * Retrieve last N chronological results for PRNG streak tracking
+     */
+    async getTeamRecentForm(team, limit = 6) {
+      const matches = await this.readLocalMatches();
+      const teamMatches = matches
+        .filter(m => m.home === team || m.away === team)
+        .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+        .slice(0, limit);
+
+      let consecutiveLosses = 0;
+      let consecutiveWins = 0;
+
+      for (const m of teamMatches) {
+        const isHome = m.home === team;
+        const won = (isHome && m.result === '1') || (!isHome && m.result === '2');
+        const lost = (isHome && m.result === '2') || (!isHome && m.result === '1');
+
+        if (won) { consecutiveWins++; consecutiveLosses = 0; }
+        else if (lost) { consecutiveLosses++; consecutiveWins = 0; }
+        else { break; }
+      }
+
+      return { recentMatches: teamMatches, consecutiveWins, consecutiveLosses };
+    },
+
+    /**
+     * Clear database store
+     */
+    async clearAllHistory() {
+      const db = await getDB();
+      const tx = db.transaction([STORE_MATCHES, STORE_RATINGS], 'readwrite');
+      tx.objectStore(STORE_MATCHES).clear();
+      tx.objectStore(STORE_RATINGS).clear();
+      return new Promise(resolve => tx.oncomplete = resolve);
+    }
+  };
+
+  window.VFLHistory = VFLHistory;
+})();
+
+File 2: script.js
+/**
+ * Unified Hybrid VFL Predictive Engine
+ * Combines Poisson xG modeling, Dynamic Elo, Fuzzy Odds Clusters, Python Risk/Trap Context, and Kelly Criterion.
+ */
+
+(function () {
+  'use strict';
+
+  // --- Mathematical Utilities ---
+
+  const MathEngine = {
+    factorial(n) {
+      if (n <= 1) return 1;
+      let res = 1;
+      for (let i = 2; i <= n; i++) res *= i;
+      return res;
+    },
+
+    poissonProb(k, lambda) {
+      return (Math.pow(lambda, k) * Math.exp(-lambda)) / this.factorial(k);
+    },
+
+    calculatexG(home, away, historicalMatches) {
+      let hScored = 0, hConceded = 0, hGames = 0;
+      let aScored = 0, aConceded = 0, aGames = 0;
+      let totalGoals = 0, totalGames = 0;
+
+      historicalMatches.forEach(m => {
+        const hG = Number(m.actualHomeGoals || 0);
+        const aG = Number(m.actualAwayGoals || 0);
+        totalGoals += (hG + aG);
+        totalGames += 1;
+
+        if (m.home === home) { hScored += hG; hConceded += aG; hGames++; }
+        if (m.away === away) { aScored += aG; aConceded += hG; aGames++; }
+      });
+
+      const avgLeagueGoalsPerGame = totalGames > 0 ? Math.max(1.0, totalGoals / (totalGames * 2)) : 1.35;
+
+      const homeAttack = hGames > 0 ? (hScored / hGames) / avgLeagueGoalsPerGame : 1.1;
+      const homeDefense = hGames > 0 ? (hConceded / hGames) / avgLeagueGoalsPerGame : 1.0;
+      const awayAttack = aGames > 0 ? (aScored / aGames) / avgLeagueGoalsPerGame : 0.9;
+      const awayDefense = aGames > 0 ? (aConceded / aGames) / avgLeagueGoalsPerGame : 1.1;
+
+      const lambdaHome = Math.max(0.2, Math.min(homeAttack * awayDefense * avgLeagueGoalsPerGame, 4.5));
+      const lambdaAway = Math.max(0.2, Math.min(awayAttack * homeDefense * avgLeagueGoalsPerGame, 4.5));
+
+      return { lambdaHome, lambdaAway };
+    },
+
+    generateScoreMatrix(lambdaHome, lambdaAway, maxGoals = 5) {
+      const matrix = [];
+      let probOver25 = 0;
+      let probUnder25 = 0;
+
+      for (let h = 0; h <= maxGoals; h++) {
+        matrix[h] = [];
+        const pH = this.poissonProb(h, lambdaHome);
+        for (let a = 0; a <= maxGoals; a++) {
+          const pA = this.poissonProb(a, lambdaAway);
+          const prob = pH * pA;
+          matrix[h][a] = prob;
+
+          if (h + a > 2.5) probOver25 += prob;
+          else probUnder25 += prob;
+        }
+      }
+
+      return { matrix, probOver25, probUnder25 };
+    },
+
+    calculateKelly(probability, decimalOdds, bankrollFraction = 0.25) {
+      const b = decimalOdds - 1;
+      const p = probability;
+      const q = 1 - p;
+
+      if (b <= 0 || p <= 0) return { rawKelly: 0, recommendedStakePct: 0 };
+
+      const fStar = (p * b - q) / b;
+      const recommendedStakePct = Math.max(0, fStar * bankrollFraction);
+
+      return {
+        rawKelly: (fStar * 100).toFixed(2),
+        recommendedStakePct: (recommendedStakePct * 100).toFixed(2)
+      };
+    }
+  };
+
+  // --- Python Trap & H2H Context Logic ---
+
+  function evaluatePythonContext(home, away, hOdds, dOdds, aOdds, h2hRecords) {
+    let riskFlag = "NONE";
+    let confidenceOverride = null;
+    let forceDrawSignal = false;
+    let matchTemplates = [];
+
+    // Favorite trap detection
+    if (hOdds <= 1.45 || aOdds <= 1.45) {
+      const fav = hOdds <= 1.45 ? home : away;
+      riskFlag = `⚠️ Heavy-Favorite Trap Detected on ${fav} (${Math.min(hOdds, aOdds).toFixed(2)})! High 0-0/1-1 Risk.`;
+      forceDrawSignal = true;
+      matchTemplates = ["0-0_A", "1-1_C", "1-0_B"];
+    } else if (hOdds < dOdds && hOdds < aOdds) {
+      matchTemplates = ["2-0_A", "3-1_A", "2-1_B"];
+    } else if (aOdds < dOdds && aOdds < hOdds) {
+      matchTemplates = ["1-2_A", "1-3_B", "0-2_A"];
+    } else {
+      riskFlag = "DRAW MATRIX: Compressed Margin Under 2.5";
+      matchTemplates = ["1-1_A", "0-0_A"];
+    }
+
+    // Head-to-Head analysis
+    if (h2hRecords && h2hRecords.length >= 2) {
+      const total = h2hRecords.length;
+      let hWins = 0, aWins = 0, draws = 0;
+
+      h2hRecords.forEach(m => {
+        if (m.home === home) {
+          if (m.hGoals > m.aGoals) hWins++;
+          else if (m.aGoals > m.hGoals) aWins++;
+          else draws++;
+        } else {
+          if (m.aGoals > m.hGoals) hWins++;
+          else if (m.hGoals > m.aGoals) aWins++;
+          else draws++;
+        }
+      });
+
+      if (hWins / total >= 0.6) confidenceOverride = "VERY HIGH (Home H2H Dominance)";
+      else if (aWins / total >= 0.6) confidenceOverride = "VERY HIGH (Away H2H Dominance)";
+      else if (draws / total >= 0.5) confidenceOverride = "HIGH (H2H Draw Tendency)";
+    }
+
+    return { riskFlag, forceDrawSignal, confidenceOverride, matchTemplates };
+  }
+
+  // --- Robust Text Parser ---
+
+  function parseGameweekClipboardData(rawText) {
+    const lines = rawText.split('\n').map(l => l.trim()).filter(Boolean);
+    const fixtures = [];
+
+    // Pattern matching: "Home vs Away" or "Home - Away" followed by odds
+    const oddsRegex = /(\d+\.\d{2})\s+(\d+\.\d{2})\s+(\d+\.\d{2})/;
+    const teamVersusRegex = /([A-Za-z0-9\s]+)\s+(?:vs|v|-)\s+([A-Za-z0-9\s]+)/i;
+
+    let currentHome = null, currentAway = null;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+
+      const versusMatch = line.match(teamVersusRegex);
+      if (versusMatch) {
+        currentHome = versusMatch[1].trim();
+        currentAway = versusMatch[2].trim();
+      }
+
+      const oddsMatch = line.match(oddsRegex);
+      if (oddsMatch && currentHome && currentAway) {
+        fixtures.push({
+          home: currentHome,
+          away: currentAway,
+          hOdds: parseFloat(oddsMatch[1]),
+          dOdds: parseFloat(oddsMatch[2]),
+          aOdds: parseFloat(oddsMatch[3])
+        });
+        currentHome = null;
+        currentAway = null;
+      }
+    }
+
+    return fixtures;
+  }
+
+  // --- Main Predictive Pipeline ---
+
+  async function analyzeFixtureHybridML(fixture, idx) {
+    const { home, away, hOdds, dOdds, aOdds } = fixture;
+
+    // 1. Fetch persistent history & Elo
+    const historicalMatches = await window.VFLHistory.readLocalMatches();
+    const homeElo = await window.VFLHistory.getTeamElo(home);
+    const awayElo = await window.VFLHistory.getTeamElo(away);
+
+    // 2. Implied Probabilities & Vig Margin
+    const rawH = 1 / hOdds, rawD = 1 / dOdds, rawA = 1 / aOdds;
+    const totalMargin = rawH + rawD + rawA;
+    const vigAnomaly = totalMargin > 1.11; // Flag bookmaker margin spike (>111%)
+
+    // 3. Fuzzy Historical Odds Lookup
+    const fuzzyCluster = await window.VFLHistory.queryFuzzyHistoricalCluster(hOdds, dOdds, aOdds, 0.05);
+
+    // 4. Poisson Distribution xG Model
+    const xG = MathEngine.calculatexG(home, away, historicalMatches);
+    const scoreMatrix = MathEngine.generateScoreMatrix(xG.lambdaHome, xG.lambdaAway);
+
+    // 5. Head-to-Head & PRNG Streaks
+    const h2h = await window.VFLHistory.getHeadToHead(home, away);
+    const homeStreak = await window.VFLHistory.getTeamRecentForm(home);
+    const awayStreak = await window.VFLHistory.getTeamRecentForm(away);
+
+    // 6. Python Context & Trap Detection
+    const pythonContext = evaluatePythonContext(home, away, hOdds, dOdds, aOdds, h2h);
+
+    // 7. Dynamic Weights & Blend Calculation
+    const eloDiff = homeElo - awayElo;
+    const eloProbHome = 1 / (1 + Math.pow(10, -eloDiff / 400));
+    const eloProbAway = 1 - eloProbHome;
+
+    let blendH = (rawH / totalMargin) * 0.20 + 
+                 (fuzzyCluster.pHome ?? rawH) * 0.35 + 
+                 eloProbHome * 0.20 + 
+                 (scoreMatrix.matrix[1][0] + scoreMatrix.matrix[2][0] + scoreMatrix.matrix[2][1]) * 0.25;
+
+    let blendD = (rawD / totalMargin) * 0.20 + 
+                 (fuzzyCluster.pDraw ?? rawD) * 0.35 + 
+                 (scoreMatrix.matrix[0][0] + scoreMatrix.matrix[1][1] + scoreMatrix.matrix[2][2]) * 0.45;
+
+    let blendA = (rawA / totalMargin) * 0.20 + 
+                 (fuzzyCluster.pAway ?? rawA) * 0.35 + 
+                 eloProbAway * 0.20 + 
+                 (scoreMatrix.matrix[0][1] + scoreMatrix.matrix[0][2] + scoreMatrix.matrix[1][2]) * 0.25;
+
+    // PRNG Mean Reversion adjustment
+    if (homeStreak.consecutiveLosses >= 4) blendH += 0.08;
+    if (awayStreak.consecutiveLosses >= 4) blendA += 0.08;
+
+    const normSum = blendH + blendD + blendA;
+    blendH /= normSum; blendD /= normSum; blendA /= normSum;
+
+    // Prediction selection
+    let prediction = blendH > blendD && blendH > blendA ? '1' : blendA > blendD ? '2' : 'X';
+    if (pythonContext.forceDrawSignal && blendD >= 0.27) {
+      prediction = 'X';
+    }
+
+    // Kelly Bet Sizing
+    const chosenProb = prediction === '1' ? blendH : prediction === 'X' ? blendD : blendA;
+    const chosenOdds = prediction === '1' ? hOdds : prediction === 'X' ? dOdds : aOdds;
+    const kelly = MathEngine.calculateKelly(chosenProb, chosenOdds, 0.25);
+
+    return {
+      idx, home, away, hOdds, dOdds, aOdds,
+      homeElo, awayElo,
+      totalMarginPct: (totalMargin * 100).toFixed(1),
+      vigAnomaly,
+      hProb: (blendH * 100).toFixed(1),
+      dProb: (blendD * 100).toFixed(1),
+      aProb: (blendA * 100).toFixed(1),
+      prediction,
+      xGHome: xG.lambdaHome.toFixed(2),
+      xGAway: xG.lambdaAway.toFixed(2),
+      probOver25: (scoreMatrix.probOver25 * 100).toFixed(1),
+      probUnder25: (scoreMatrix.probUnder25 * 100).toFixed(1),
+      fuzzyMatches: fuzzyCluster.matchCount,
+      riskFlag: pythonContext.riskFlag,
+      templates: pythonContext.matchTemplates,
+      confidence: pythonContext.confidenceOverride || (chosenProb > 0.52 ? "HIGH CONVICTION" : "MEDIUM SIGNAL"),
+      kellyPct: kelly.recommendedStakePct
+    };
+  }
+
+  // --- UI Rendering Engine ---
+
+  function renderMatchCard(m) {
+    const badgeText = m.prediction === '1' ? 'HOME WIN (1)' : m.prediction === 'X' ? 'DRAW (X)' : 'AWAY WIN (2)';
+    const badgeClass = m.prediction === '1' ? 'home-win' : m.prediction === 'X' ? 'draw-win' : 'away-win';
+
+    return `
+      <div class="match-card" data-idx="${m.idx}">
+        <div class="match-header">
+          <div class="match-title">
+            <strong>${m.home}</strong> <small>(${m.homeElo})</small> vs <strong>${m.away}</strong> <small>(${m.awayElo})</small>
+          </div>
+          <span class="badge ${badgeClass}">${badgeText}</span>
+        </div>
+
+        ${m.vigAnomaly ? `<div class="alert alert-danger">⚠️ High Bookie Margin Detected (${m.totalMarginPct}% Vig)</div>` : ''}
+        ${m.riskFlag !== "NONE" ? `<div class="alert alert-warning">${m.riskFlag}</div>` : ''}
+
+        <div class="odds-grid">
+          <div class="odds-box ${m.prediction === '1' ? 'highlight' : ''}">
+            <span class="label">1 (${m.hOdds.toFixed(2)})</span>
+            <span class="value">${m.hProb}%</span>
+          </div>
+          <div class="odds-box ${m.prediction === 'X' ? 'highlight' : ''}">
+            <span class="label">X (${m.dOdds.toFixed(2)})</span>
+            <span class="value">${m.dProb}%</span>
+          </div>
+          <div class="odds-box ${m.prediction === '2' ? 'highlight' : ''}">
+            <span class="label">2 (${m.aOdds.toFixed(2)})</span>
+            <span class="value">${m.aProb}%</span>
+          </div>
+        </div>
+
+        <div class="stats-panel">
+          <div><strong>xG:</strong> ${m.xGHome} - ${m.xGAway}</div>
+          <div><strong>O/U 2.5:</strong> Over ${m.probOver25}% | Under ${m.probUnder25}%</div>
+          <div><strong>Fuzzy Cluster Matches:</strong> ${m.fuzzyMatches}</div>
+          <div><strong>Confidence:</strong> ${m.confidence}</div>
+          <div><strong>Kelly Stake:</strong> <span class="kelly-value">${m.kellyPct}% Bankroll</span></div>
+          <div><strong>Templates:</strong> ${m.templates.join(', ')}</div>
+        </div>
+
+        <div class="result-input-row">
+          <input type="number" id="hGoals_${m.idx}" placeholder="Home Goals" min="0" max="15">
+          <input type="number" id="aGoals_${m.idx}" placeholder="Away Goals" min="0" max="15">
+          <button class="btn btn-save" onclick="window.saveMatchResult(${m.idx})">Save Result</button>
+        </div>
+      </div>
+    `;
+  }
+
+  // --- App State & DOM Binding ---
+
+  let currentPredictions = [];
+
+  async function processGameweek() {
+    const rawInput = document.getElementById('rawClipboardInput').value;
+    if (!rawInput.trim()) {
+      alert("Please paste gameweek data standard text.");
+      return;
+    }
+
+    const fixtures = parseGameweekClipboardData(rawInput);
+    if (fixtures.length === 0) {
+      alert("No valid fixtures or odds found in parsed text. Check input format.");
+      return;
+    }
+
+    const container = document.getElementById('predictionsContainer');
+    container.innerHTML = '<div class="loading">Running Hybrid ML Models & Processing History...</div>';
+
+    currentPredictions = [];
+    let html = '';
+
+    for (let i = 0; i < fixtures.length; i++) {
+      const result = await analyzeFixtureHybridML(fixtures[i], i);
+      currentPredictions.push(result);
+      html += renderMatchCard(result);
+    }
+
+    container.innerHTML = html;
+  }
+
+  window.saveMatchResult = async function (idx) {
+    const pred = currentPredictions[idx];
+    if (!pred) return;
+
+    const hGInput = document.getElementById(`hGoals_${idx}`);
+    const aGInput = document.getElementById(`aGoals_${idx}`);
+
+    if (hGInput.value === '' || aGInput.value === '') {
+      alert("Enter valid score values.");
+      return;
+    }
+
+    const actualHomeGoals = parseInt(hGInput.value, 10);
+    const actualAwayGoals = parseInt(aGInput.value, 10);
+
+    await window.VFLHistory.saveLocalMatch({
+      home: pred.home,
+      away: pred.away,
+      hOdds: pred.hOdds,
+      dOdds: pred.dOdds,
+      aOdds: pred.aOdds,
+      actualHomeGoals,
+      actualAwayGoals
+    });
+
+    alert(`Result for ${pred.home} vs ${pred.away} saved and Elo ratings updated!`);
+    hGInput.disabled = true;
+    aGInput.disabled = true;
+  };
+
+  document.addEventListener('DOMContentLoaded', () => {
+    const parseBtn = document.getElementById('btnParseGameweek');
+    if (parseBtn) parseBtn.addEventListener('click', processGameweek);
+
+    const clearBtn = document.getElementById('btnClearHistory');
+    if (clearBtn) {
+      clearBtn.addEventListener('click', async () => {
+        if (confirm("Are you sure you want to clear all stored match history and Elo ratings?")) {
+          await window.VFLHistory.clearAllHistory();
+          alert("Match history reset successfully.");
+        }
+      });
+    }
+  });
+
+})();
+
+File 3: index.html
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <meta name="theme-color" content="#07111f">
-  <meta name="description" content="OdiLeague Gameweek Analyzer - Smart VFL Data Analysis with Historical Tracking">
-  <title>OdiLeague Gameweek Analyzer</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Unified Hybrid VFL Predictive Engine</title>
   <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-
-    body {
-      font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      background: linear-gradient(135deg, #07111f 0%, #0d1e2f 100%);
-      color: #e0e7ff;
-      line-height: 1.6;
-      min-height: 100vh;
-      padding: 20px;
-    }
-
-    .container {
-      max-width: 1400px;
-      margin: 0 auto;
-    }
-
-    header {
-      text-align: center;
-      margin-bottom: 40px;
-      padding: 20px 0;
-      border-bottom: 1px solid rgba(224, 231, 255, 0.1);
-    }
-
-    .brand-mark {
-      font-size: 48px;
-      margin-bottom: 10px;
-    }
-
-    h1 {
-      font-size: 2.5rem;
-      margin-bottom: 10px;
-      background: linear-gradient(135deg, #a78bfa 0%, #60a5fa 100%);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
-    }
-
-    .subtitle {
-      color: #94a3b8;
-      font-size: 0.95rem;
-    }
-
-    .panel {
-      background: rgba(30, 41, 59, 0.6);
-      backdrop-filter: blur(10px);
-      border: 1px solid rgba(148, 163, 184, 0.2);
-      border-radius: 12px;
-      padding: 30px;
-      margin-bottom: 30px;
-      box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.3);
-    }
-
-    .section-heading {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 25px;
-      padding-bottom: 15px;
-      border-bottom: 1px solid rgba(224, 231, 255, 0.1);
-    }
-
-    .eyebrow {
-      font-size: 0.75rem;
-      text-transform: uppercase;
-      letter-spacing: 1.5px;
-      color: #a78bfa;
-      font-weight: 600;
-    }
-
-    h2 {
-      font-size: 1.5rem;
-      margin-top: 5px;
-    }
-
-    .status-pill {
-      background: rgba(34, 197, 94, 0.2);
-      color: #86efac;
-      padding: 6px 12px;
-      border-radius: 20px;
-      font-size: 0.75rem;
-      font-weight: 600;
-      letter-spacing: 1px;
-    }
-
-    textarea {
-      width: 100%;
-      min-height: 200px;
-      padding: 15px;
-      background: rgba(15, 23, 42, 0.5);
-      border: 1px solid rgba(148, 163, 184, 0.3);
-      border-radius: 8px;
-      color: #e0e7ff;
-      font-family: 'Courier New', monospace;
-      font-size: 0.9rem;
-      resize: vertical;
-      margin-bottom: 15px;
-    }
-
-    textarea::placeholder {
-      color: rgba(148, 163, 184, 0.5);
-    }
-
-    button {
-      background: linear-gradient(135deg, #a78bfa 0%, #7c3aed 100%);
-      color: white;
-      border: none;
-      padding: 12px 24px;
-      border-radius: 8px;
-      font-weight: 600;
-      font-size: 0.95rem;
-      cursor: pointer;
-      transition: all 0.3s ease;
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-    }
-
-    button:hover {
-      transform: translateY(-2px);
-      box-shadow: 0 10px 20px rgba(167, 139, 250, 0.3);
-    }
-
-    button:active {
-      transform: translateY(0);
-    }
-
-    .secondary-btn {
-      background: rgba(148, 163, 184, 0.2);
-      border: 1px solid rgba(148, 163, 184, 0.5);
-      color: #cbd5e1;
-    }
-
-    .secondary-btn:hover {
-      background: rgba(148, 163, 184, 0.3);
-      box-shadow: none;
-    }
-
-    .button-group {
-      display: flex;
-      gap: 12px;
-      flex-wrap: wrap;
-      margin-bottom: 20px;
-    }
-
-    .data-controls {
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-      margin-bottom: 25px;
-      padding: 15px;
-      background: rgba(15, 23, 42, 0.3);
-      border-radius: 8px;
-      border: 1px solid rgba(96, 165, 250, 0.2);
-    }
-
-    .control-btn {
-      padding: 10px 16px;
-      font-size: 0.9rem;
-      background: rgba(96, 165, 250, 0.1);
-      border: 1px solid rgba(96, 165, 250, 0.3);
-      color: #60a5fa;
-      border-radius: 6px;
-      cursor: pointer;
-      transition: all 0.2s ease;
-    }
-
-    .control-btn:hover {
-      background: rgba(96, 165, 250, 0.2);
-      border-color: rgba(96, 165, 250, 0.6);
-    }
-
-    .control-btn:active {
-      transform: scale(0.98);
-    }
-
-    .clear-btn {
-      background: rgba(239, 68, 68, 0.1);
-      border-color: rgba(239, 68, 68, 0.3);
-      color: #fca5a5;
-    }
-
-    .clear-btn:hover {
-      background: rgba(239, 68, 68, 0.2);
-      border-color: rgba(239, 68, 68, 0.6);
-    }
-
-    .import-panel {
-      background: rgba(15, 23, 42, 0.7);
-      border: 1px solid rgba(96, 165, 250, 0.3);
-      border-radius: 8px;
-      padding: 20px;
-      margin-bottom: 20px;
-      animation: slideDown 0.3s ease;
-    }
-
-    .import-panel.hidden {
-      display: none !important;
-    }
-
-    @keyframes slideDown {
-      from {
-        opacity: 0;
-        max-height: 0;
-      }
-      to {
-        opacity: 1;
-        max-height: 500px;
-      }
-    }
-
-    .results-panel {
-      transition: opacity 0.3s ease;
-    }
-
-    .results-panel.hidden {
-      display: none;
-    }
-
-    .match-banner {
-      background: linear-gradient(135deg, rgba(96, 165, 250, 0.1), rgba(167, 139, 250, 0.1));
-      border-left: 4px solid #60a5fa;
-      padding: 15px;
-      border-radius: 8px;
-      margin-bottom: 20px;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      font-weight: 500;
-    }
-
-    .match-banner span:first-child {
-      font-size: 1.2rem;
-      flex-shrink: 0;
-    }
-
-    .match-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
-      gap: 20px;
-      margin-bottom: 30px;
-      width: 100%;
-    }
-
-    .match-card {
-      background: rgba(15, 23, 42, 0.5);
-      border: 1px solid rgba(96, 165, 250, 0.3);
-      border-radius: 10px;
-      padding: 18px;
-      transition: all 0.3s ease;
-      display: flex;
-      flex-direction: column;
-      height: 100%;
-      position: relative;
-      overflow: hidden;
-    }
-
-    .match-card::before {
-      content: '';
-      position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-      height: 3px;
-      background: linear-gradient(90deg, #a78bfa, #60a5fa);
-      opacity: 0;
-      transition: opacity 0.3s ease;
-    }
-
-    .match-card:hover {
-      border-color: rgba(96, 165, 250, 0.6);
-      background: rgba(15, 23, 42, 0.8);
-      box-shadow: 0 8px 16px rgba(96, 165, 250, 0.2);
-      transform: translateY(-2px);
-    }
-
-    .match-card:hover::before {
-      opacity: 1;
-    }
-
-    .match-card.result-saved {
-      border-color: rgba(34, 197, 94, 0.5);
-      background: rgba(15, 23, 42, 0.6);
-    }
-
-    .match-card.result-saved::before {
-      background: linear-gradient(90deg, #34d399, #10b981);
-      opacity: 1;
-    }
-
-    .match-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-start;
-      gap: 10px;
-      margin-bottom: 12px;
-      padding-bottom: 10px;
-      border-bottom: 1px solid rgba(224, 231, 255, 0.1);
-    }
-
-    .match-title {
-      font-weight: 700;
-      font-size: 0.95rem;
-      color: #e0e7ff;
-      line-height: 1.3;
-      flex: 1;
-    }
-
-    .prediction-badge {
-      background: linear-gradient(135deg, #34d399 0%, #10b981 100%);
-      color: #1f3a3a;
-      padding: 4px 8px;
-      border-radius: 6px;
-      font-size: 0.7rem;
-      font-weight: 700;
-      letter-spacing: 0.5px;
-      white-space: nowrap;
-      flex-shrink: 0;
-    }
-
-    .prediction-badge.draw {
-      background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%);
-      color: #3f2206;
-    }
-
-    .prediction-badge.away {
-      background: linear-gradient(135deg, #f87171 0%, #ef4444 100%);
-      color: #3f1015;
-    }
-
-    .odds-row {
-      display: grid;
-      grid-template-columns: 1fr 1fr 1fr;
-      gap: 8px;
-      margin-bottom: 12px;
-      padding: 10px;
-      background: rgba(15, 23, 42, 0.3);
-      border-radius: 6px;
-    }
-
-    .odds-cell {
-      text-align: center;
-      display: flex;
-      flex-direction: column;
-      justify-content: center;
-    }
-
-    .odds-label {
-      display: block;
-      font-size: 0.7rem;
-      color: #94a3b8;
-      margin-bottom: 3px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-
-    .odds-value {
-      display: block;
-      font-size: 1.2rem;
-      font-weight: 700;
-      color: #60a5fa;
-      line-height: 1.2;
-    }
-
-    .confidence-text {
-      font-size: 0.8rem;
-      color: #cbd5e1;
-      margin-bottom: 10px;
-      padding: 8px;
-      background: rgba(167, 139, 250, 0.05);
-      border-left: 2px solid rgba(167, 139, 250, 0.3);
-      border-radius: 4px;
-    }
-
-    .confidence-text strong {
-      color: #a78bfa;
-    }
-
-    .result-section {
-      margin-top: auto;
-      padding-top: 12px;
-      border-top: 1px solid rgba(224, 231, 255, 0.1);
-    }
-
-    .result-inputs {
-      display: flex;
-      gap: 8px;
-      align-items: center;
-      margin-bottom: 10px;
-    }
-
-    .goal-select {
-      flex: 1;
-      padding: 8px;
-      background: rgba(15, 23, 42, 0.6);
-      border: 1px solid rgba(96, 165, 250, 0.3);
-      border-radius: 6px;
-      color: #e0e7ff;
-      font-size: 0.85rem;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all 0.2s ease;
-    }
-
-    .goal-select:hover {
-      border-color: rgba(96, 165, 250, 0.6);
-      background: rgba(15, 23, 42, 0.8);
-    }
-
-    .goal-select:focus {
-      outline: none;
-      border-color: #60a5fa;
-      box-shadow: 0 0 8px rgba(96, 165, 250, 0.3);
-    }
-
-    .goal-select:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-
-    .vs-text {
-      color: #94a3b8;
-      font-weight: 600;
-      font-size: 0.8rem;
-    }
-
-    .save-result-btn {
-      width: 100%;
-      padding: 8px 12px;
-      background: linear-gradient(135deg, #34d399 0%, #10b981 100%);
-      color: #1f3a3a;
-      border: none;
-      border-radius: 6px;
-      font-size: 0.8rem;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all 0.2s ease;
-    }
-
-    .save-result-btn:hover {
-      transform: translateY(-1px);
-      box-shadow: 0 4px 12px rgba(52, 211, 153, 0.3);
-    }
-
-    .save-result-btn:active {
-      transform: translateY(0);
-    }
-
-    .result-saved .save-result-btn {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-
-    .summary-stats {
-      background: rgba(15, 23, 42, 0.5);
-      border: 1px solid rgba(148, 163, 184, 0.2);
-      border-radius: 8px;
-      padding: 20px;
-      margin-top: 20px;
-    }
-
-    .stat-row {
-      display: flex;
-      justify-content: space-between;
-      padding: 12px 0;
-      border-bottom: 1px solid rgba(224, 231, 255, 0.05);
-    }
-
-    .stat-row:last-child {
-      border-bottom: none;
-    }
-
-    .stat-label {
-      color: #94a3b8;
-      font-size: 0.9rem;
-      font-weight: 500;
-    }
-
-    .stat-value {
-      color: #e0e7ff;
-      font-weight: 700;
-    }
-
-    .notification {
-      position: fixed;
-      bottom: 20px;
-      right: 20px;
-      padding: 16px 20px;
-      background: rgba(30, 41, 59, 0.95);
-      border: 1px solid rgba(148, 163, 184, 0.3);
-      border-radius: 8px;
-      color: #e0e7ff;
-      font-weight: 500;
-      font-size: 0.9rem;
-      backdrop-filter: blur(10px);
-      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
-      opacity: 0;
-      transform: translateY(20px);
-      transition: all 0.3s ease;
-      z-index: 1000;
-      max-width: 350px;
-    }
-
-    .notification.show {
-      opacity: 1;
-      transform: translateY(0);
-    }
-
-    .notification-success {
-      border-color: rgba(34, 197, 94, 0.4);
-      color: #bbf7d0;
-    }
-
-    .notification-success::before {
-      content: '✓ ';
-      color: #34d399;
-      font-weight: 700;
-    }
-
-    .notification-error {
-      border-color: rgba(239, 68, 68, 0.4);
-      color: #fca5a5;
-    }
-
-    .notification-error::before {
-      content: '✕ ';
-      color: #ef4444;
-      font-weight: 700;
-    }
-
-    .notification-info {
-      border-color: rgba(96, 165, 250, 0.4);
-      color: #bfdbfe;
-    }
-
-    .notification-info::before {
-      content: 'ℹ ';
-      color: #60a5fa;
-      font-weight: 700;
-    }
-
-    footer {
-      text-align: center;
-      color: #64748b;
-      font-size: 0.85rem;
-      margin-top: 40px;
-      padding-top: 20px;
-      border-top: 1px solid rgba(224, 231, 255, 0.1);
-    }
-
-    .hidden {
-      display: none !important;
-    }
-
-    @media (max-width: 1200px) {
-      .match-grid {
-        grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
-      }
-    }
-
-    @media (max-width: 768px) {
-      h1 {
-        font-size: 1.8rem;
-      }
-
-      .container {
-        padding: 0;
-      }
-
-      .panel {
-        padding: 20px;
-        margin-bottom: 20px;
-      }
-
-      .match-grid {
-        grid-template-columns: 1fr;
-        gap: 15px;
-      }
-
-      .match-card {
-        padding: 15px;
-      }
-
-      .odds-row {
-        grid-template-columns: 1fr;
-        gap: 10px;
-      }
-
-      .data-controls {
-        flex-direction: column;
-      }
-
-      .control-btn {
-        width: 100%;
-        justify-content: center;
-      }
-
-      .button-group {
-        flex-direction: column;
-      }
-
-      button {
-        width: 100%;
-        justify-content: center;
-      }
-
-      .section-heading {
-        flex-direction: column;
-        align-items: flex-start;
-      }
-
-      .status-pill {
-        margin-top: 10px;
-      }
-
-      .notification {
-        left: 10px;
-        right: 10px;
-        max-width: none;
-        bottom: 10px;
-      }
-
-      .result-inputs {
-        gap: 6px;
-      }
-
-      .vs-text {
-        font-size: 0.7rem;
-      }
-    }
-
-    @media (max-width: 480px) {
-      header {
-        margin-bottom: 20px;
-      }
-
-      h1 {
-        font-size: 1.5rem;
-      }
-
-      .brand-mark {
-        font-size: 36px;
-      }
-
-      .match-grid {
-        grid-template-columns: 1fr;
-      }
-
-      .odds-row {
-        grid-template-columns: 1fr;
-      }
-
-      .odds-value {
-        font-size: 1rem;
-      }
-
-      .data-controls {
-        gap: 8px;
-      }
-
-      .control-btn {
-        flex: 1;
-        padding: 8px 12px;
-        font-size: 0.8rem;
-        white-space: nowrap;
-      }
-    }
+    :root {
+      --bg-color: #0f172a;
+      --card-bg: #1e293b;
+      --border-color: #334155;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --accent-green: #10b981;
+      --accent-yellow: #f59e0b;
+      --accent-red: #ef4444;
+      --accent-blue: #3b82f6;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { background-color: var(--bg-color); color: var(--text-main); padding: 20px; line-height: 1.5; }
+    .container { max-width: 1000px; margin: 0 auto; }
+    
+    header { margin-bottom: 24px; border-bottom: 1px solid var(--border-color); padding-bottom: 16px; display: flex; justify-content: space-between; align-items: center; }
+    h1 { font-size: 1.5rem; color: var(--text-main); }
+
+    .input-section { background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 8px; padding: 16px; margin-bottom: 24px; }
+    textarea { width: 100%; height: 110px; background: #090d16; border: 1px solid var(--border-color); color: var(--text-main); padding: 12px; border-radius: 6px; font-family: monospace; font-size: 0.9rem; resize: vertical; margin-bottom: 12px; }
+
+    .actions { display: flex; gap: 12px; }
+    .btn { padding: 10px 18px; border: none; border-radius: 6px; font-weight: 600; cursor: pointer; transition: opacity 0.2s; }
+    .btn:hover { opacity: 0.9; }
+    .btn-primary { background: var(--accent-blue); color: #fff; }
+    .btn-danger { background: var(--accent-red); color: #fff; }
+    .btn-save { background: var(--accent-green); color: #fff; padding: 6px 12px; font-size: 0.85rem; }
+
+    .match-card { background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    .match-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+    .match-title { font-size: 1.1rem; }
+
+    .badge { padding: 4px 10px; border-radius: 4px; font-weight: bold; font-size: 0.8rem; text-transform: uppercase; }
+    .home-win { background: rgba(16, 185, 129, 0.2); color: var(--accent-green); border: 1px solid var(--accent-green); }
+    .draw-win { background: rgba(245, 158, 11, 0.2); color: var(--accent-yellow); border: 1px solid var(--accent-yellow); }
+    .away-win { background: rgba(59, 130, 246, 0.2); color: var(--accent-blue); border: 1px solid var(--accent-blue); }
+
+    .alert { padding: 8px 12px; border-radius: 6px; font-size: 0.8rem; margin-bottom: 10px; font-weight: 500; }
+    .alert-danger { background: rgba(239, 68, 68, 0.15); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.3); }
+    .alert-warning { background: rgba(245, 158, 11, 0.15); color: #fcd34d; border: 1px solid rgba(245, 158, 11, 0.3); }
+
+    .odds-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 12px; }
+    .odds-box { background: #090d16; padding: 8px; border-radius: 6px; text-align: center; border: 1px solid var(--border-color); }
+    .odds-box.highlight { border-color: var(--accent-green); background: rgba(16, 185, 129, 0.05); }
+    .odds-box .label { display: block; font-size: 0.75rem; color: var(--text-muted); }
+    .odds-box .value { font-size: 1.1rem; font-weight: bold; }
+
+    .stats-panel { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px; background: rgba(15, 23, 42, 0.6); padding: 10px; border-radius: 6px; font-size: 0.82rem; margin-bottom: 12px; border: 1px solid rgba(255, 255, 255, 0.05); }
+    .kelly-value { color: var(--accent-green); font-weight: bold; }
+
+    .result-input-row { display: flex; gap: 8px; align-items: center; }
+    .result-input-row input { width: 100px; padding: 6px; background: #090d16; border: 1px solid var(--border-color); color: #fff; border-radius: 4px; }
+
+    .loading { text-align: center; padding: 40px; color: var(--text-muted); font-size: 1rem; }
   </style>
 </head>
 <body>
+
   <div class="container">
     <header>
-      <div class="brand-mark">⚽</div>
-      <h1>OdiLeague Gameweek Analyzer</h1>
-      <p class="subtitle">Smart VFL betting analysis with AI learning from historical data</p>
+      <h1>VFL Hybrid Predictive Engine</h1>
+      <button class="btn btn-danger" id="btnClearHistory">Reset History DB</button>
     </header>
 
-    <main>
-      <section class="panel control-panel">
-        <div class="section-heading">
-          <div>
-            <p class="eyebrow">01 / INPUT</p>
-            <h2>Paste gameweek data or bulk results</h2>
-          </div>
-          <span class="status-pill">SMART PARSE</span>
-        </div>
+    <div class="input-section">
+      <textarea id="rawClipboardInput" placeholder="Paste Gameweek Fixtures & Odds Here...&#10;e.g.&#10;Arsenal vs Chelsea&#10;1.80 3.40 4.20"></textarea>
+      <div class="actions">
+        <button class="btn btn-primary" id="btnParseGameweek">Analyze Gameweek</button>
+      </div>
+    </div>
 
-        <p style="color: #94a3b8; margin-bottom: 15px; font-size: 0.9rem;">
-          <strong>Mode 1 - Predictions:</strong> Paste your betting data from OdiLeague with odds. The algorithm intelligently analyzes each fixture against its tier system and historical data.
-          <br><br>
-          <strong>Mode 2 - Bulk Results (Smart Parser):</strong> Paste match results in ANY of these formats - the algorithm auto-detects:
-          <br>
-          Format A: Home / Away / HomeGoals / AwayGoals
-          <br>
-          Format B: Home / HomeGoals / AwayGoals / Away
-          <br>
-          Supports both! No need to remember the exact order.
-        </p>
-
-        <textarea id="data-input" placeholder="MODE 1 - Predictions (with odds):
-Liverpool
-Everton
-1.63
-3.79
-5.38
-
-Tottenham
-London Blues
-3.14
-...
-
-OR MODE 2 - Bulk Results (ANY format):
-Brighton
-Leeds
-1
-1
-
-Sheffield U
-Southampton
-0
-0
-
-Tottenham
-Liverpool
-1
-4
-
-OR ALTERNATIVE:
-Liverpool
-1
-4
-Tottenham"></textarea>
-
-        <div class="button-group">
-          <button id="parse-btn" type="button">
-            <span>Parse & Analyze (With Odds)</span>
-            <span>→</span>
-          </button>
-          <button id="bulk-btn" type="button" style="background: linear-gradient(135deg, #60a5fa 0%, #3b82f6 100%);">
-            <span>⚡ Import Bulk Results</span>
-            <span>→</span>
-          </button>
-          <button class="secondary-btn" id="clear-btn" type="button">Clear Input</button>
-        </div>
-
-        <div class="data-controls">
-          <button class="control-btn" id="export-btn" type="button">📥 Export JSON (Download)</button>
-          <button class="control-btn" id="copy-btn" type="button">📋 Copy JSON</button>
-          <button class="control-btn" id="import-toggle-btn" type="button">📤 Import JSON (Paste)</button>
-          <button class="control-btn" id="upload-btn" type="button">📁 Upload JSON (File)</button>
-          <button class="control-btn clear-btn" id="clear-history-btn" type="button">🗑️ Clear History</button>
-        </div>
-
-        <input type="file" id="import-file-input" accept="application/json" style="display:none" />
-
-        <div class="import-panel hidden" id="import-panel" aria-hidden="true">
-          <p style="color:#bfdbfe; font-size:0.95rem; margin-bottom:8px">Paste the exported JSON below to merge into local history. Duplicates are automatically skipped.</p>
-          <textarea id="import-textarea" placeholder='Paste exported JSON here'></textarea>
-          <div style="display:flex; gap:8px; margin-top:10px;">
-            <button class="control-btn" id="paste-import-btn" type="button">✓ Paste & Import</button>
-            <button class="control-btn secondary-btn" id="import-cancel-btn" type="button">Cancel</button>
-          </div>
-        </div>
-      </section>
-
-      <section class="panel results-panel hidden" id="results-panel" aria-live="polite">
-        <div class="section-heading">
-          <div>
-            <p class="eyebrow">02 / OUTPUT & HISTORY</p>
-            <h2>Gameweek predictions & result tracking</h2>
-          </div>
-          <span class="status-pill">LIVE</span>
-        </div>
-        
-        <div id="results-content"></div>
-      </section>
+    <main id="predictionsContainer">
+      <!-- Dynamic Prediction Match Cards will be rendered here -->
     </main>
-
-    <footer>Built for precision · Powered by intelligent parsing, tier analysis, and transparent probability signals · Historical learning engine active</footer>
   </div>
 
-  <div id="notification" class="notification" role="status" aria-live="polite"></div>
-
+  <script src="dynamic-history.js"></script>
   <script src="script.js"></script>
 </body>
 </html>
