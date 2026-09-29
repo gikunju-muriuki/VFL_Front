@@ -56,77 +56,78 @@
    * INTELLIGENT BULK RESULTS PARSER
    */
   function parseBulkResults(rawText) {
-    if (!rawText || typeof rawText !== 'string') {
-      throw new Error('No data provided');
-    }
-
-    const lines = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-    const matches = [];
-    let i = 0;
-
-    while (i < lines.length) {
-      if (i + 3 >= lines.length) break;
-
-      const line0 = lines[i];
-      const line1 = lines[i + 1];
-      const line2 = lines[i + 2];
-      const line3 = lines[i + 3];
-
-      const team0 = findTeamMatch(line0);
-      const isGoal1 = isGoalScore(line1);
-      const isGoal2 = isGoalScore(line2);
-      const team3 = findTeamMatch(line3);
-
-      // Pattern 1: Team / HomeGoals / AwayGoals / Team
-      if (team0 && isGoal1 && isGoal2 && team3 && team0 !== team3) {
-        const homeGoals = parseInt(line1, 10);
-        const awayGoals = parseInt(line2, 10);
-        const result = homeGoals > awayGoals ? '1' : homeGoals === awayGoals ? 'X' : '2';
-        matches.push({
-          home: team0,
-          away: team3,
-          actualHomeGoals: homeGoals,
-          actualAwayGoals: awayGoals,
-          result: result,
-          timestamp: new Date().toISOString(),
-          homeOdds: 0,
-          drawOdds: 0,
-          awayOdds: 0,
-          oddsCombo: '0|0|0'
-        });
-        i += 4;
-        continue;
-      }
-
-      // Pattern 2: Team / Team / HomeGoals / AwayGoals (standard)
-      const team1 = findTeamMatch(line1);
-      if (team0 && team1 && team0 !== team1 && isGoal2 && isGoalScore(line3)) {
-        const homeGoals = parseInt(line2, 10);
-        const awayGoals = parseInt(line3, 10);
-        const result = homeGoals > awayGoals ? '1' : homeGoals === awayGoals ? 'X' : '2';
-        matches.push({
-          home: team0,
-          away: team1,
-          actualHomeGoals: homeGoals,
-          actualAwayGoals: awayGoals,
-          result: result,
-          timestamp: new Date().toISOString(),
-          homeOdds: 0,
-          drawOdds: 0,
-          awayOdds: 0,
-          oddsCombo: '0|0|0'
-        });
-        i += 4;
-        continue;
-      }
-      i++;
-    }
-
-    if (matches.length === 0) {
-      throw new Error('No valid match results found. Supported formats:\n1. Home\nAway\nHomeGoals\nAwayGoals\n\nOR\n\n2. Home\nHomeGoals\nAwayGoals\nAway');
-    }
-    return matches;
+  if (!rawText || typeof rawText !== 'string') {
+    throw new Error('No data provided');
   }
+
+  const lines = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  const matches = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    if (i + 3 >= lines.length) break;
+
+    const line0 = lines[i];
+    const line1 = lines[i + 1];
+    const line2 = lines[i + 2];
+    const line3 = lines[i + 3];
+
+    const team0 = findTeamMatch(line0);
+    const isGoal1 = isGoalScore(line1);
+    const isGoal2 = isGoalScore(line2);
+    const team3 = findTeamMatch(line3);
+
+    // Pattern 1: Team / HomeGoals / AwayGoals / Team
+    if (team0 && isGoal1 && isGoal2 && team3 && team0 !== team3) {
+      const homeGoals = parseInt(line1, 10);
+      const awayGoals = parseInt(line2, 10);
+      const result = homeGoals > awayGoals ? '1' : homeGoals === awayGoals ? 'X' : '2';
+      matches.push({
+        home: team0,
+        away: team3,
+        actualHomeGoals: homeGoals,
+        actualAwayGoals: awayGoals,
+        result: result,
+        timestamp: new Date().toISOString(),
+        homeOdds: null,
+        drawOdds: null,
+        awayOdds: null,
+        oddsCombo: null
+      });
+      i += 4;
+      continue;
+    }
+
+    // Pattern 2: Team / Team / HomeGoals / AwayGoals (standard)
+    const team1 = findTeamMatch(line1);
+    if (team0 && team1 && team0 !== team1 && isGoal2 && isGoalScore(line3)) {
+      const homeGoals = parseInt(line2, 10);
+      const awayGoals = parseInt(line3, 10);
+      const result = homeGoals > awayGoals ? '1' : homeGoals === awayGoals ? 'X' : '2';
+      matches.push({
+        home: team0,
+        away: team1,
+        actualHomeGoals: homeGoals,
+        actualAwayGoals: awayGoals,
+        result: result,
+        timestamp: new Date().toISOString(),
+        homeOdds: null,
+        drawOdds: null,
+        awayOdds: null,
+        oddsCombo: null
+      });
+      i += 4;
+      continue;
+    }
+    i++;
+  }
+
+  if (matches.length === 0) {
+    throw new Error('No valid match results found. Supported formats:\n1. Home\nAway\nHomeGoals\nAwayGoals\n\nOR\n\n2. Home\nHomeGoals\nAwayGoals\nAway');
+  }
+  return matches;
+}
+
 
   function isGoalScore(str) {
     const num = parseInt(str, 10);
@@ -623,28 +624,53 @@
     }
   }
 
-  async function processBulkResults() {
-    const inputField = $('data-input');
-    if (!inputField || !inputField.value.trim()) {
-      showNotification('Please paste data first', 'error');
-      return;
+ async function processBulkResults() {
+  const inputField = $('data-input');
+  if (!inputField || !inputField.value.trim()) {
+    showNotification('Please paste data first', 'error');
+    return;
+  }
+
+  try {
+    const results = parseBulkResults(inputField.value);
+    const existingMatches = await getAllMatches();
+    let saved = 0;
+
+    for (const result of results) {
+      // 1. Look for pre-existing odds in memory from active analyses
+      const activeMatch = currentAnalyses.find(
+        a => a.home === result.home && a.away === result.away
+      );
+
+      // 2. Look for existing saved record in database for this matchup
+      const historicalMatch = existingMatches.find(
+        m => m.home === result.home && m.away === result.away && m.homeOdds > 1.0
+      );
+
+      // 3. Resolve actual odds from active session or historical record
+      const hOdds = activeMatch?.hOdds || historicalMatch?.homeOdds || null;
+      const dOdds = activeMatch?.dOdds || historicalMatch?.drawOdds || null;
+      const aOdds = activeMatch?.aOdds || historicalMatch?.awayOdds || null;
+
+      const matchRecord = {
+        ...result,
+        homeOdds: hOdds,
+        drawOdds: dOdds,
+        awayOdds: aOdds,
+        oddsCombo: hOdds && dOdds && aOdds ? `${hOdds.toFixed(2)}|${dOdds.toFixed(2)}|${aOdds.toFixed(2)}` : null
+      };
+
+      await saveMatch(matchRecord);
+      saved++;
     }
 
-    try {
-      const results = parseBulkResults(inputField.value);
-      let saved = 0;
-      
-      for (const result of results) {
-        await saveMatch(result);
-        saved++;
-      }
-      
-      inputField.value = '';
-      showNotification(`✓ Bulk imported ${saved} match results to history`, 'success');
-    } catch (err) {
-      showNotification(err.message, 'error');
-    }
+    inputField.value = '';
+    showNotification(`✓ Bulk imported ${saved} match results to history`, 'success');
+  } catch (err) {
+    showNotification(err.message, 'error');
   }
+}
+
 
   function clearInput() {
     const inputField = $('data-input');
