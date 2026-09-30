@@ -6,15 +6,13 @@
  */
 (() => {
   'use strict';
-
-  const TEAM_TIERS = {
-    "London Blues": 1, "Liverpool": 1, "Manchester Blue": 1, "London Reds": 1,
-    "Manchester Reds": 2, "Aston V": 2, "Newcastle": 2, "Tottenham": 2, "Everton": 2,
-    "Leicester": 3, "West Brom": 3, "Wolves": 3, "Palace": 3, "Brighton": 3, "West Ham": 3,
-    "Leeds": 4, "Burnley": 4, "Fulham": 4, "Southampton": 4, "Sheffield U": 4,
-  };
-
-  const VALID_TEAMS = Object.keys(TEAM_TIERS).sort();
+  // Standardized Virtual Football League Identification Array
+  const VALID_TEAMS = [
+    "Aston V", "Brighton", "Burnley", "Everton", "Fulham", 
+    "Leeds", "Leicester", "Liverpool", "London Blues", "London Reds", 
+    "Manchester Blue", "Manchester Reds", "Newcastle", "Palace", "Sheffield U", 
+    "Southampton", "Tottenham", "West Brom", "West Ham", "Wolves"
+  ].sort();
 
   const DB_CONFIG = {
     name: 'VFL_MatchHistory',
@@ -231,11 +229,37 @@
     const awayElo = eloRatings[away] || 1500;
     const eloDiff = homeElo - awayElo;
 
-    const baseTierHome = TEAM_TIERS[home] || 3;
-    const baseTierAway = TEAM_TIERS[away] || 3;
-    const tierDifferential = baseTierAway - baseTierHome;
+    // =========================================================================
+    // UPGRADE: DYNAMIC THREE-ODDS CLUSTERING VECTOR (REPLACES TEAM TIERS)
+    // =========================================================================
+    let clusterMatches = historicalData.filter(match => 
+      match.homeOdds > 0 &&
+      Math.abs(match.homeOdds - hOdds) <= 0.15 &&
+      Math.abs(match.drawOdds - dOdds) <= 0.15 &&
+      Math.abs(match.awayOdds - aOdds) <= 0.15
+    );
+
+    let clusterTotalGoals = 0;
+    let clusterHomeWins = 0;
+    let clusterAwayWins = 0;
+    let clusterDraws = 0;
+    
+    clusterMatches.forEach(m => {
+      clusterTotalGoals += (Number(m.actualHomeGoals ?? 0) + Number(m.actualAwayGoals ?? 0));
+      if (m.result === '1') clusterHomeWins++;
+      else if (m.result === 'X') clusterDraws++;
+      else if (m.result === '2') clusterAwayWins++;
+    });
+
+    const clusterSampleCount = clusterMatches.length;
+    const dynamicClusterGPG = clusterSampleCount > 0 ? (clusterTotalGoals / clusterSampleCount) : 2.5;
+
+    // Generate a structural market tier differential based on historic probability density
+    // Instead of using real-world names, it measures the favorite/underdog disparity mathematically
+    const tierDifferential = rawHProb > rawAProb ? (rawHProb - rawAProb) * 2 : (rawHProb - rawAProb) * 2;
 
     // 4. Head-To-Head (H2H) Context
+
     const h2h = window.VFLHistory ? window.VFLHistory.getHeadToHead(historicalData, home, away) : { total: 0, homeWins: 0, awayWins: 0, draws: 0, recent: [] };
 
     // 5. Odds Tolerance (Binning ±0.05) & Time-Decay Exponential Weighting
@@ -294,15 +318,26 @@
     if (homeForm.streakType === 'L' && homeForm.streakCount >= 4) meanReversionShiftH += 0.05;
     if (awayForm.streakType === 'L' && awayForm.streakCount >= 4) meanReversionShiftA += 0.05;
 
-    // 8. Expected Goals (xG) & Poisson Score Distribution
+        // 8. Expected Goals (xG) & Poisson Score Distribution
     const xg = window.VFLHistory ? window.VFLHistory.calculatePoissonXG(historicalData, home, away) : { lambdaHome: 1.35, lambdaAway: 1.15 };
     let scoreMatrix = [];
     let probOver25 = 0;
     let probUnder25 = 0;
 
+    // Apply look-up matrix override directly to the raw lambda expectations if enough sample data exists
+    let modifiedLambdaHome = xg.lambdaHome;
+    let modifiedLambdaAway = xg.lambdaAway;
+
+    if (clusterSampleCount >= 5) {
+      // Balance out pure Poisson values with the historical realities of this three-odds configuration tier
+      const empiricalGPGDiscrepancy = dynamicClusterGPG / (xg.lambdaHome + xg.lambdaAway);
+      modifiedLambdaHome *= Math.max(0.5, Math.min(2.0, empiricalGPGDiscrepancy));
+      modifiedLambdaAway *= Math.max(0.5, Math.min(2.0, empiricalGPGDiscrepancy));
+    }
+
     for (let hG = 0; hG <= 5; hG++) {
       for (let aG = 0; aG <= 5; aG++) {
-        const p = poissonProb(xg.lambdaHome, hG) * poissonProb(xg.lambdaAway, aG);
+        const p = poissonProb(modifiedLambdaHome, hG) * poissonProb(modifiedLambdaAway, aG);
         scoreMatrix.push({ score: `${hG}-${aG}`, hG, aG, prob: p });
         if (hG + aG > 2.5) probOver25 += p;
         else probUnder25 += p;
@@ -330,6 +365,7 @@
 
     const globalEntropySuppression = recentLeagueGPG - baseHistoricalGPG;
 
+    // Apply global loop corrections to the newly blended odds-cluster baseline probabilities
     if (globalEntropySuppression > 0.45) {
       probOver25 *= Math.max(0.70, 1.0 - (globalEntropySuppression * 0.5));
       probUnder25 = 1.0 - probOver25;
@@ -342,10 +378,16 @@
     const topScores = scoreMatrix.slice(0, 3).map(s => `${s.score} (${(s.prob * 100).toFixed(1)}%)`);
 
     // 9. Blended Machine Learning Feature Weights
-    let weightH = (rawHProb * 0.25) + (dynamicHomeRank * 0.30) + (binnedHomeRank * 0.25) + (eloDiff > 0 ? 0.05 : 0) + meanReversionShiftH;
-    let weightX = (rawDProb * 0.25) + (dynamicDrawRank * 0.30) + (binnedDrawRank * 0.25);
-    let weightA = (rawAProb * 0.25) + (dynamicAwayRank * 0.30) + (binnedAwayRank * 0.25) + (eloDiff < 0 ? 0.05 : 0) + meanReversionShiftA;
+    let clusterHomeWinPct = clusterSampleCount > 0 ? (clusterHomeWins / clusterSampleCount) : rawHProb;
+    let clusterDrawPct = clusterSampleCount > 0 ? (clusterDraws / clusterSampleCount) : rawDProb;
+    let clusterAwayWinPct = clusterSampleCount > 0 ? (clusterAwayWins / clusterSampleCount) : rawAProb;
 
+    // Fuses bookmaker probability, time-decayed ranks, exact binned rows, and dynamic odds clusters
+    let weightH = (rawHProb * 0.20) + (dynamicHomeRank * 0.25) + (binnedHomeRank * 0.25) + (clusterHomeWinPct * 0.20) + (eloDiff > 0 ? 0.05 : 0) + meanReversionShiftH;
+    let weightX = (rawDProb * 0.20) + (dynamicDrawRank * 0.25) + (binnedDrawRank * 0.25) + (clusterDrawPct * 0.20);
+    let weightA = (rawAProb * 0.20) + (dynamicAwayRank * 0.25) + (binnedAwayRank * 0.25) + (clusterAwayWinPct * 0.20) + (eloDiff < 0 ? 0.05 : 0) + meanReversionShiftA;
+
+    // Apply supplementary adjustments for anomalous bookmaker behavior inside balanced profiles
     if (marginAnomaly && hOdds > 2.20 && aOdds > 2.20) {
       weightX += 0.085; 
     }
@@ -370,12 +412,15 @@
       finalHProb /= newSum;
       finalDProb /= newSum;
       finalAProb /= newSum;
-    } else if (hOdds < dOdds && hOdds < aOdds && tierDifferential >= 1) {
-      templates = ["2-0_A", "3-1_A"];
-    } else if (aOdds < dOdds && aOdds < hOdds && tierDifferential <= -1) {
-      templates = ["1-2_A", "1-3_B"];
+    } else if (hOdds < dOdds && hOdds < aOdds && hOdds <= 2.00) {
+      // Formats home-favored matrices automatically based on mathematical odds density
+      templates = ["2-0_A", "3-1_A", "2-1_B"];
+    } else if (aOdds < dOdds && aOdds < hOdds && aOdds <= 2.00) {
+      // Formats away-favored matrices automatically based on mathematical odds density
+      templates = ["1-2_A", "1-3_B", "1-2_B"];
     } else {
-      templates = ["1-1_A", "0-0_A"];
+      // Closely balanced pick'em rows
+      templates = ["1-1_A", "0-0_A", "2-2_C"];
     }
 
     // Determine Prediction State
