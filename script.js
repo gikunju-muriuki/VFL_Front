@@ -728,8 +728,50 @@
     handleFileUpload,
     showNotification,
     clearAllMatches,
-    clearInput
+    clearInput,
+    evaluateSystemState
   };
+  
+// =========================================================================
+// ADD-ON ENGINE: PRNG SYSTEM STATE VARIANCE MONITOR
+// =========================================================================
+window.VFLPRNGTracker = {
+  /**
+   * Compares the rolling 10-match score volatility matrix against the base history
+   */
+  async evaluateSystemState() {
+    const historicalData = await window.VFLHistory.readLocalMatches();
+    if (historicalData.length < 10) return null;
+
+    const leagueMatches = [...historicalData].sort((a, b) => new Date(a.timestamp || 0) - new Date(b.timestamp || 0));
+    
+    let globalGoalsSum = 0;
+    let recentGoalsSum = 0;
+    
+    leagueMatches.forEach(m => globalGoalsSum += (m.actualHomeGoals + m.actualAwayGoals));
+    const globalAvg = globalGoalsSum / leagueMatches.length;
+
+    const recentMatches = leagueMatches.slice(-10);
+    recentMatches.forEach(m => recentGoalsSum += (m.actualHomeGoals + m.actualAwayGoals));
+    const recentAvg = recentGoalsSum / recentMatches.length;
+
+    const netVariance = recentAvg - globalAvg;
+    let actionState = "STABLE PRNG ENGINE MATRIX";
+    let adviceColor = "#93c5fd";
+
+    if (netVariance > 0.45) {
+      actionState = "CRITICAL HIGH-GOAL CORRECTION WAVE EXPECTED (Target Under 2.5 Selections)";
+      adviceColor = "#fca5a5";
+    } else if (netVariance < -0.45) {
+      actionState = "CRITICAL DRY-RUN CORRECTION WAVE EXPECTED (Target Over 2.5 Selections)";
+      adviceColor = "#86efac";
+    }
+
+    console.log(`%c[PRNG WAVE MONITOR] State: ${actionState} | Net: ${netVariance.toFixed(2)}`, `color: ${adviceColor}; font-weight: bold;`);
+    return { netVariance, actionState, adviceColor };
+  }
+};
+  
 
   window.addEventListener('DOMContentLoaded', () => {
     console.log('VFL Unified Hybrid Engine Initialized');
