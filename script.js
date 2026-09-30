@@ -732,15 +732,11 @@
     evaluateSystemState
   };
   
-// =========================================================================
-// ADD-ON ENGINE: PRNG SYSTEM STATE VARIANCE MONITOR
-// =========================================================================
-window.VFLPRNGTracker = {
-  /**
-   * Compares the rolling 10-match score volatility matrix against the base history
-   */
-  async evaluateSystemState() {
-    const historicalData = await window.VFLHistory.readLocalMatches();
+  // =========================================================================
+  // ADD-ON ENGINE: PRNG SYSTEM STATE VARIANCE MONITOR
+  // =========================================================================
+  async function evaluateSystemState() {
+    const historicalData = await getAllMatches();
     if (historicalData.length < 10) return null;
 
     const leagueMatches = [...historicalData].sort((a, b) => new Date(a.timestamp || 0) - new Date(b.timestamp || 0));
@@ -748,11 +744,11 @@ window.VFLPRNGTracker = {
     let globalGoalsSum = 0;
     let recentGoalsSum = 0;
     
-    leagueMatches.forEach(m => globalGoalsSum += (m.actualHomeGoals + m.actualAwayGoals));
+    leagueMatches.forEach(m => globalGoalsSum += (Number(m.actualHomeGoals ?? 0) + Number(m.actualAwayGoals ?? 0)));
     const globalAvg = globalGoalsSum / leagueMatches.length;
 
     const recentMatches = leagueMatches.slice(-10);
-    recentMatches.forEach(m => recentGoalsSum += (m.actualHomeGoals + m.actualAwayGoals));
+    recentMatches.forEach(m => recentGoalsSum += (Number(m.actualHomeGoals ?? 0) + Number(m.actualAwayGoals ?? 0)));
     const recentAvg = recentGoalsSum / recentMatches.length;
 
     const netVariance = recentAvg - globalAvg;
@@ -770,8 +766,6 @@ window.VFLPRNGTracker = {
     console.log(`%c[PRNG WAVE MONITOR] State: ${actionState} | Net: ${netVariance.toFixed(2)}`, `color: ${adviceColor}; font-weight: bold;`);
     return { netVariance, actionState, adviceColor };
   }
-};
-  
 
   window.addEventListener('DOMContentLoaded', () => {
     console.log('VFL Unified Hybrid Engine Initialized');
