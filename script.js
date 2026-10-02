@@ -579,6 +579,7 @@
     if (!resultsPanel || !resultsContent) return;
 
     currentAnalyses = analyses;
+    window.VFLBrain.currentAnalyses = analyses;
     let html = '<div class="match-grid">';
 
     analyses.forEach((analysis, idx) => {
@@ -699,10 +700,13 @@ async function processInput() {
     const mlEvaluatedFixtures = await Promise.all(
       basicFixtures.map((m, idx) => analyzeFixtureML(m.home, m.away, m.homeOdds, m.drawOdds, m.awayOdds, idx))
     );
-    
+
     await renderMatches(mlEvaluatedFixtures);
-    window.RecommendationEngine.displayRecommendation();
-    renderRecommendedSelection();
+
+    if (window.RecommendationEngine && typeof window.RecommendationEngine.displayRecommendation === 'function') {
+      window.RecommendationEngine.displayRecommendation();
+    }
+
     showNotification(`Parsed and analyzed ${basicFixtures.length} matches`, 'success');
   } catch (err) {
     showNotification(err.message, 'error');
@@ -767,72 +771,20 @@ async function processInput() {
 
   // Global API Exposure
   window.VFLBrain = {
-    processInput,
-    processBulkResults,
-    captureResult,
-    exportHistory,
-    copyHistoryToClipboard,
-    importHistoryFromJson,
-    handleFileUpload,
-    showNotification,
-    clearAllMatches,
-    clearInput,
-    evaluateSystemState
-  };
+   processInput,
+   processBulkResults,
+   captureResult,
+   exportHistory,
+   copyHistoryToClipboard,
+   importHistoryFromJson,
+   handleFileUpload,
+   showNotification,
+   clearAllMatches,
+   clearInput,
+   evaluateSystemState,
+   currentAnalyses: []
+};
 
-  // ===============================================================
-  // ADD-ON ENGINE: RECOMMENDED SELECTION
-  // ===============================================================
-  
-  function getRecommendedSelection() {
-  const analyses = Array.isArray(window.VFLBrain?.currentAnalyses)
-    ? window.VFLBrain.currentAnalyses.slice(0, 10)
-    : [];
-
-  const candidates = [];
-
-  analyses.forEach((match) => {
-    if (match.confidence !== 'VERY HIGH CONVICTION (H2H Backed)') return;
-
-    const homeCandidate = { team: match.home, odds: Number(match.hOdds) };
-    const awayCandidate = { team: match.away, odds: Number(match.aOdds) };
-
-    [homeCandidate, awayCandidate].forEach((candidate) => {
-      if (candidate.odds >= 2.70 && candidate.odds <= 2.97) {
-        candidates.push(candidate);
-      }
-    });
-  });
-
-  if (!candidates.length) return null;
-
-  const selected = candidates.reduce((best, current) => {
-    return current.odds > best.odds ? current : best;
-  });
-
-  return {
-    team: selected.team,
-    odds: Number(selected.odds.toFixed(2)),
-    text: `recommended selection - ${selected.team} to win with ${Number(selected.odds).toFixed(2)}`
-  };
-}
-
-function renderRecommendedSelection() {
-  const selection = getRecommendedSelection();
-  const banner = document.getElementById('recommended-selection-banner');
-
-  if (!banner) return;
-
-  if (!selection) {
-    banner.textContent = '';
-    banner.classList.add('hidden');
-    return;
-  }
-
-  banner.textContent = selection.text;
-  banner.classList.remove('hidden');
-}
-  
   // =========================================================================
   // ADD-ON ENGINE: PRNG SYSTEM STATE VARIANCE MONITOR
   // =========================================================================
