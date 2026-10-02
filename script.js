@@ -701,6 +701,7 @@ async function processInput() {
     );
     
     await renderMatches(mlEvaluatedFixtures);
+    window.RecommendationEngine.displayRecommendation();
     renderRecommendedSelection();
     showNotification(`Parsed and analyzed ${basicFixtures.length} matches`, 'success');
   } catch (err) {
